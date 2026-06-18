@@ -4,15 +4,6 @@ import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { getSupabase } from '@/lib/supabase'
 
-// ─── Pricing lookup (XOF) from CONTEXT.MD ───────────────────
-const PRICING = {
-  setup: { S: 25000, M: 40000, L: 60000 },
-  annual: {
-    STANDARD: { S: 45000, M: 70000, L: 100000 },
-    PRO:      { S: 70000, M: 110000, L: 150000 },
-  },
-}
-
 const STATUS_LABELS = {
   pending_activation: 'En attente',
   active: 'Actif',
@@ -44,21 +35,22 @@ function Sidebar({ onLogout }) {
           </div>
         </div>
       </div>
-
-      <nav className="flex-1 p-3">
+      <nav className="flex-1 p-3 space-y-1">
         <a href="/" className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-steel-700/50 text-steel-200 text-sm">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
           </svg>
           Écoles
         </a>
+        <a href="/pricing" className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-steel-400 hover:text-steel-200 hover:bg-steel-700/50 text-sm transition-colors">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          Tarification
+        </a>
       </nav>
-
       <div className="p-3 border-t border-steel-700">
-        <button
-          onClick={onLogout}
-          className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-steel-400 hover:text-steel-200 hover:bg-steel-700/50 text-sm w-full transition-colors"
-        >
+        <button onClick={onLogout} className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-steel-400 hover:text-steel-200 hover:bg-steel-700/50 text-sm w-full transition-colors">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
           </svg>
@@ -69,18 +61,44 @@ function Sidebar({ onLogout }) {
   )
 }
 
-// ─── Add School Modal ────────────────────────────────────────
+// ─── Add School Modal (dynamic pricing from DB) ──────────────
 function AddSchoolModal({ open, onClose, onCreated }) {
   const [form, setForm] = useState({
     school_name: '', director_name: '', director_phone: '',
-    director_email: '', city: '', address: '',
+    director_email: '', city: '', address: '', country: 'Bénin',
     tier: 'STANDARD', size: 'S', semesters_active: 3,
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [pricingPlans, setPricingPlans] = useState([])
+  const [countries, setCountries] = useState([])
+
+  useEffect(() => {
+    if (!open) return
+    async function loadPricing() {
+      const supabase = getSupabase()
+      const { data } = await supabase
+        .from('pricing_plans')
+        .select('*')
+        .eq('is_active', true)
+        .order('country')
+      setPricingPlans(data || [])
+      const unique = [...new Set((data || []).map(p => p.country))]
+      setCountries(unique)
+    }
+    loadPricing()
+  }, [open])
 
   function update(field, value) {
     setForm(prev => ({ ...prev, [field]: value }))
+  }
+
+  function getPricing() {
+    const plan = pricingPlans.find(
+      p => p.country === form.country && p.tier === form.tier && p.size === form.size
+    )
+    if (!plan) return { setup_fee: 0, annual_fee: 0, currency: 'XOF' }
+    return plan
   }
 
   async function handleSubmit(e) {
@@ -89,31 +107,31 @@ function AddSchoolModal({ open, onClose, onCreated }) {
     setSaving(true)
 
     const supabase = getSupabase()
+    const pricing = getPricing()
 
-    // Generate school code
-    const { data: codeResult, error: codeErr } = await supabase.rpc('generate_school_code')
+    const countryPlan = pricingPlans.find(p => p.country === form.country)
+    const countryCode = countryPlan?.country_code || 'BJ'
+
+    const { data: codeResult, error: codeErr } = await supabase.rpc('generate_school_code', { p_country_code: countryCode })
     if (codeErr) {
       setError('Erreur de génération du code école')
       setSaving(false)
       return
     }
 
-    const schoolCode = codeResult
-    const setupFee = PRICING.setup[form.size]
-    const annualFee = PRICING.annual[form.tier][form.size]
-    const prorated = Math.round(annualFee * (form.semesters_active / 3))
+    const prorated = Math.round(pricing.annual_fee * (form.semesters_active / 3))
 
-    // Insert school
     const { data: school, error: schoolErr } = await supabase
       .from('schools')
       .insert({
-        school_code: schoolCode,
+        school_code: codeResult,
         school_name: form.school_name.trim(),
         director_name: form.director_name.trim(),
         director_phone: form.director_phone.trim() || null,
         director_email: form.director_email.trim() || null,
         city: form.city.trim() || null,
         address: form.address.trim() || null,
+        country: form.country,
       })
       .select('id')
       .single()
@@ -124,7 +142,6 @@ function AddSchoolModal({ open, onClose, onCreated }) {
       return
     }
 
-    // Insert license
     const { error: licErr } = await supabase
       .from('licenses')
       .insert({
@@ -132,8 +149,8 @@ function AddSchoolModal({ open, onClose, onCreated }) {
         tier: form.tier,
         size: form.size,
         semesters_active: form.semesters_active,
-        setup_fee: setupFee,
-        annual_fee: annualFee,
+        setup_fee: pricing.setup_fee,
+        annual_fee: pricing.annual_fee,
         annual_fee_assigned: prorated,
       })
 
@@ -146,7 +163,7 @@ function AddSchoolModal({ open, onClose, onCreated }) {
     setSaving(false)
     setForm({
       school_name: '', director_name: '', director_phone: '',
-      director_email: '', city: '', address: '',
+      director_email: '', city: '', address: '', country: 'Bénin',
       tier: 'STANDARD', size: 'S', semesters_active: 3,
     })
     onCreated()
@@ -155,9 +172,8 @@ function AddSchoolModal({ open, onClose, onCreated }) {
 
   if (!open) return null
 
-  const setupFee = PRICING.setup[form.size]
-  const annualFee = PRICING.annual[form.tier][form.size]
-  const prorated = Math.round(annualFee * (form.semesters_active / 3))
+  const pricing = getPricing()
+  const prorated = Math.round(pricing.annual_fee * (form.semesters_active / 3))
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -167,7 +183,6 @@ function AddSchoolModal({ open, onClose, onCreated }) {
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          {/* School info */}
           <div>
             <label className="block text-sm text-steel-600 mb-1">Nom de l'école <span className="text-red-500">*</span></label>
             <input
@@ -227,8 +242,17 @@ function AddSchoolModal({ open, onClose, onCreated }) {
 
           <hr className="border-steel-100" />
 
-          {/* License config */}
-          <div className="grid grid-cols-3 gap-4">
+          {/* Country + License config */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm text-steel-600 mb-1">Pays <span className="text-red-500">*</span></label>
+              <select
+                value={form.country} onChange={(e) => update('country', e.target.value)}
+                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand bg-white"
+              >
+                {countries.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
             <div>
               <label className="block text-sm text-steel-600 mb-1">Licence <span className="text-red-500">*</span></label>
               <select
@@ -239,6 +263,9 @@ function AddSchoolModal({ open, onClose, onCreated }) {
                 <option value="PRO">Pro</option>
               </select>
             </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm text-steel-600 mb-1">Taille <span className="text-red-500">*</span></label>
               <select
@@ -267,38 +294,32 @@ function AddSchoolModal({ open, onClose, onCreated }) {
           <div className="bg-steel-50 rounded-lg p-4 space-y-2">
             <div className="flex justify-between text-sm">
               <span className="text-steel-500">Frais d'installation</span>
-              <span className="text-steel-800 font-medium">{setupFee.toLocaleString('fr-FR')} XOF</span>
+              <span className="text-steel-800 font-medium">{pricing.setup_fee.toLocaleString('fr-FR')} {pricing.currency}</span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-steel-500">Licence annuelle</span>
-              <span className="text-steel-800 font-medium">{annualFee.toLocaleString('fr-FR')} XOF</span>
+              <span className="text-steel-800 font-medium">{pricing.annual_fee.toLocaleString('fr-FR')} {pricing.currency}</span>
             </div>
             {form.semesters_active < 3 && (
               <div className="flex justify-between text-sm">
                 <span className="text-steel-500">Prorata ({form.semesters_active}/3)</span>
-                <span className="text-brand font-medium">{prorated.toLocaleString('fr-FR')} XOF</span>
+                <span className="text-brand font-medium">{prorated.toLocaleString('fr-FR')} {pricing.currency}</span>
               </div>
             )}
             <hr className="border-steel-200" />
             <div className="flex justify-between text-sm font-medium">
               <span className="text-steel-700">Total à percevoir</span>
-              <span className="text-steel-900">{(setupFee + prorated).toLocaleString('fr-FR')} XOF</span>
+              <span className="text-steel-900">{(pricing.setup_fee + prorated).toLocaleString('fr-FR')} {pricing.currency}</span>
             </div>
           </div>
 
           {error && <p className="text-red-500 text-sm">{error}</p>}
 
           <div className="flex gap-3 pt-2">
-            <button
-              type="button" onClick={onClose}
-              className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors"
-            >
+            <button type="button" onClick={onClose} className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors">
               Annuler
             </button>
-            <button
-              type="submit" disabled={saving}
-              className="flex-1 py-2.5 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
-            >
+            <button type="submit" disabled={saving} className="flex-1 py-2.5 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">
               {saving ? 'Création...' : 'Créer l\'école'}
             </button>
           </div>
@@ -308,9 +329,57 @@ function AddSchoolModal({ open, onClose, onCreated }) {
   )
 }
 
-// ─── School Detail Modal ─────────────────────────────────────
+// ─── School Detail Modal (full operational view) ─────────────
 function SchoolDetail({ school, onClose, onUpdated }) {
   const [toggling, setToggling] = useState(false)
+  const [hwBinding, setHwBinding] = useState(null)
+  const [otpHistory, setOtpHistory] = useState([])
+  const [lastSync, setLastSync] = useState(null)
+  const [loadingExtra, setLoadingExtra] = useState(true)
+  const [generatingOtp, setGeneratingOtp] = useState(false)
+  const [newOtpCode, setNewOtpCode] = useState(null)
+
+  async function loadDetails() {
+    setLoadingExtra(true)
+    const supabase = getSupabase()
+
+    const [hwRes, otpRes, syncRes] = await Promise.all([
+      supabase.from('hardware_bindings').select('*').eq('school_id', school.id).maybeSingle(),
+      supabase.from('otp_codes').select('*').eq('school_id', school.id).order('created_at', { ascending: false }).limit(5),
+      supabase.from('sync_log').select('*').eq('school_id', school.id).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    ])
+
+    setHwBinding(hwRes.data)
+    setOtpHistory(otpRes.data || [])
+    setLastSync(syncRes.data)
+    setLoadingExtra(false)
+  }
+
+  useEffect(() => {
+    if (!school) return
+    setNewOtpCode(null)
+    loadDetails()
+  }, [school])
+
+  async function generateOtp() {
+    setGeneratingOtp(true)
+    setNewOtpCode(null)
+    const supabase = getSupabase()
+
+    const code = String(Math.floor(100000 + Math.random() * 900000))
+
+    const { error } = await supabase.from('otp_codes').insert({
+      school_id: school.id,
+      code,
+      channel: 'manual',
+    })
+
+    if (!error) {
+      setNewOtpCode(code)
+      loadDetails()
+    }
+    setGeneratingOtp(false)
+  }
 
   if (!school) return null
 
@@ -319,16 +388,8 @@ function SchoolDetail({ school, onClose, onUpdated }) {
     const supabase = getSupabase()
     const newActive = !school.licenses[0]?.is_active
 
-    await supabase
-      .from('licenses')
-      .update({ is_active: newActive })
-      .eq('school_id', school.id)
-
-    if (newActive) {
-      await supabase.from('schools').update({ status: 'active' }).eq('id', school.id)
-    } else {
-      await supabase.from('schools').update({ status: 'suspended' }).eq('id', school.id)
-    }
+    await supabase.from('licenses').update({ is_active: newActive }).eq('school_id', school.id)
+    await supabase.from('schools').update({ status: newActive ? 'active' : 'suspended' }).eq('id', school.id)
 
     setToggling(false)
     onUpdated()
@@ -338,9 +399,28 @@ function SchoolDetail({ school, onClose, onUpdated }) {
   const license = school.licenses?.[0]
   const isActive = license?.is_active
 
+  function formatDate(d) {
+    if (!d) return '—'
+    return new Date(d).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
+  }
+
+  function formatDateTime(d) {
+    if (!d) return '—'
+    return new Date(d).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  }
+
+  function daysUntilExpiry() {
+    if (!license?.expiry_date) return null
+    const diff = Math.ceil((new Date(license.expiry_date) - new Date()) / (1000 * 60 * 60 * 24))
+    return diff
+  }
+
+  const expiryDays = daysUntilExpiry()
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] overflow-y-auto">
+        {/* Header */}
         <div className="p-6 border-b border-steel-200 flex items-center justify-between">
           <div>
             <h2 className="text-lg font-medium text-steel-900">{school.school_name}</h2>
@@ -351,61 +431,241 @@ function SchoolDetail({ school, onClose, onUpdated }) {
           </span>
         </div>
 
-        <div className="p-6 space-y-4">
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <p className="text-steel-400">Directeur</p>
-              <p className="text-steel-800 font-medium">{school.director_name}</p>
-            </div>
-            <div>
-              <p className="text-steel-400">Téléphone</p>
-              <p className="text-steel-800">{school.director_phone || '—'}</p>
-            </div>
-            <div>
-              <p className="text-steel-400">Ville</p>
-              <p className="text-steel-800">{school.city || '—'}</p>
-            </div>
-            <div>
-              <p className="text-steel-400">Email</p>
-              <p className="text-steel-800">{school.director_email || '—'}</p>
+        <div className="p-6 space-y-5">
+          {/* School info */}
+          <div>
+            <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide mb-3">Informations</h3>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <p className="text-steel-400">Directeur</p>
+                <p className="text-steel-800 font-medium">{school.director_name}</p>
+              </div>
+              <div>
+                <p className="text-steel-400">Téléphone</p>
+                <p className="text-steel-800">{school.director_phone || '—'}</p>
+              </div>
+              <div>
+                <p className="text-steel-400">Ville</p>
+                <p className="text-steel-800">{school.city || '—'}</p>
+              </div>
+              <div>
+                <p className="text-steel-400">Email</p>
+                <p className="text-steel-800">{school.director_email || '—'}</p>
+              </div>
+              <div>
+                <p className="text-steel-400">Pays</p>
+                <p className="text-steel-800">{school.country || '—'}</p>
+              </div>
+              <div>
+                <p className="text-steel-400">Inscrit le</p>
+                <p className="text-steel-800">{formatDate(school.created_at)}</p>
+              </div>
             </div>
           </div>
 
+          {/* License plan */}
           {license && (
-            <>
-              <hr className="border-steel-100" />
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <p className="text-steel-400">Licence</p>
-                  <p className="text-steel-800 font-medium">{license.tier} — {license.size}</p>
-                </div>
-                <div>
-                  <p className="text-steel-400">Expiration</p>
-                  <p className="text-steel-800">{new Date(license.expiry_date).toLocaleDateString('fr-FR')}</p>
-                </div>
-                <div>
-                  <p className="text-steel-400">Installation</p>
-                  <p className="text-steel-800">{license.setup_fee?.toLocaleString('fr-FR')} XOF</p>
-                </div>
-                <div>
-                  <p className="text-steel-400">Licence annuelle</p>
-                  <p className="text-steel-800">{(license.annual_fee_assigned || license.annual_fee)?.toLocaleString('fr-FR')} XOF</p>
+            <div>
+              <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide mb-3">Licence</h3>
+              <div className="bg-steel-50 rounded-lg p-4">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <p className="text-steel-400">Plan</p>
+                    <p className="text-steel-800 font-medium">
+                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium mr-1 ${
+                        license.tier === 'PRO' ? 'bg-brand-50 text-brand-600' : 'bg-steel-200 text-steel-600'
+                      }`}>{license.tier}</span>
+                      {license.size === 'S' ? 'Petite' : license.size === 'M' ? 'Moyenne' : 'Grande'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Trimestres actifs</p>
+                    <p className="text-steel-800">{license.semesters_active}/3</p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Frais d'installation</p>
+                    <p className="text-steel-800">{license.setup_fee?.toLocaleString('fr-FR')} XOF</p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Licence annuelle</p>
+                    <p className="text-steel-800">{license.annual_fee?.toLocaleString('fr-FR')} XOF</p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Montant facturé</p>
+                    <p className="text-steel-800 font-medium">{(license.annual_fee_assigned || license.annual_fee)?.toLocaleString('fr-FR')} XOF</p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Date d'expiration</p>
+                    <p className={`font-medium ${expiryDays !== null && expiryDays < 30 ? 'text-red-500' : 'text-steel-800'}`}>
+                      {formatDate(license.expiry_date)}
+                      {expiryDays !== null && (
+                        <span className="text-xs ml-1 text-steel-400">
+                          ({expiryDays > 0 ? `${expiryDays}j restants` : 'expiré'})
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Activé le</p>
+                    <p className="text-steel-800">{license.activated_at ? formatDateTime(license.activated_at) : 'Non activé'}</p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Statut licence</p>
+                    <p className={`font-medium ${isActive ? 'text-brand' : 'text-red-500'}`}>
+                      {isActive ? 'Active' : 'Désactivée'}
+                    </p>
+                  </div>
                 </div>
               </div>
-            </>
+            </div>
           )}
+
+          {/* Hardware binding */}
+          <div>
+            <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide mb-3">Matériel lié</h3>
+            {loadingExtra ? (
+              <p className="text-sm text-steel-400">Chargement...</p>
+            ) : hwBinding ? (
+              <div className="bg-steel-50 rounded-lg p-4">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="col-span-2">
+                    <p className="text-steel-400">Empreinte matérielle</p>
+                    <p className="text-steel-800 font-mono text-xs break-all">{hwBinding.fingerprint}</p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Lié le</p>
+                    <p className="text-steel-800">{formatDateTime(hwBinding.bound_at)}</p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Re-liaisons</p>
+                    <p className="text-steel-800">{hwBinding.rebound_count || 0} fois</p>
+                  </div>
+                  {hwBinding.previous_fingerprint && (
+                    <div className="col-span-2">
+                      <p className="text-steel-400">Empreinte précédente</p>
+                      <p className="text-steel-600 font-mono text-xs break-all">{hwBinding.previous_fingerprint}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="bg-steel-50 rounded-lg p-4 text-center">
+                <p className="text-sm text-steel-400">Aucun matériel lié — en attente d'activation</p>
+              </div>
+            )}
+          </div>
+
+          {/* Last sync */}
+          <div>
+            <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide mb-3">Dernière synchronisation</h3>
+            {loadingExtra ? (
+              <p className="text-sm text-steel-400">Chargement...</p>
+            ) : lastSync ? (
+              <div className="bg-steel-50 rounded-lg p-4">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <p className="text-steel-400">Date</p>
+                    <p className="text-steel-800">{formatDateTime(lastSync.started_at)}</p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Statut</p>
+                    <p className={`font-medium ${
+                      lastSync.status === 'success' ? 'text-brand' :
+                      lastSync.status === 'failed' ? 'text-red-500' : 'text-yellow-600'
+                    }`}>
+                      {lastSync.status === 'success' ? 'Réussi' :
+                       lastSync.status === 'failed' ? 'Échoué' :
+                       lastSync.status === 'partial' ? 'Partiel' : 'En cours'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Envoyés</p>
+                    <p className="text-steel-800">{lastSync.records_sent}</p>
+                  </div>
+                  <div>
+                    <p className="text-steel-400">Reçus</p>
+                    <p className="text-steel-800">{lastSync.records_received}</p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="bg-steel-50 rounded-lg p-4 text-center">
+                <p className="text-sm text-steel-400">Aucune synchronisation effectuée</p>
+              </div>
+            )}
+          </div>
+
+          {/* OTP section */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide">Historique OTP</h3>
+              {school.status === 'pending_activation' && (
+                <button
+                  onClick={generateOtp}
+                  disabled={generatingOtp}
+                  className="px-3 py-1.5 text-xs font-medium bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg transition-colors"
+                >
+                  {generatingOtp ? 'Génération...' : 'Générer un OTP'}
+                </button>
+              )}
+            </div>
+
+            {newOtpCode && (
+              <div className="bg-brand-50 border border-brand-100 rounded-lg p-4 mb-3 text-center">
+                <p className="text-xs text-brand-600 mb-1">Code OTP généré — à communiquer au directeur</p>
+                <p className="text-3xl font-mono font-bold text-brand tracking-widest">{newOtpCode}</p>
+                <p className="text-xs text-steel-400 mt-2">Expire dans 10 minutes</p>
+              </div>
+            )}
+
+            {loadingExtra ? (
+              <p className="text-sm text-steel-400">Chargement...</p>
+            ) : otpHistory.length > 0 ? (
+              <div className="bg-steel-50 rounded-lg overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-steel-200">
+                      <th className="text-left px-3 py-2 text-steel-400 font-medium">Code</th>
+                      <th className="text-left px-3 py-2 text-steel-400 font-medium">Canal</th>
+                      <th className="text-left px-3 py-2 text-steel-400 font-medium">Créé</th>
+                      <th className="text-left px-3 py-2 text-steel-400 font-medium">Statut</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {otpHistory.map(otp => (
+                      <tr key={otp.id} className="border-b border-steel-100">
+                        <td className="px-3 py-2 font-mono text-steel-700">{otp.code}</td>
+                        <td className="px-3 py-2 text-steel-600">{otp.channel}</td>
+                        <td className="px-3 py-2 text-steel-600">{formatDateTime(otp.created_at)}</td>
+                        <td className="px-3 py-2">
+                          <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+                            otp.is_used ? 'bg-brand-50 text-brand-600' :
+                            new Date(otp.expires_at) < new Date() ? 'bg-steel-200 text-steel-500' :
+                            'bg-yellow-100 text-yellow-700'
+                          }`}>
+                            {otp.is_used ? 'Utilisé' : new Date(otp.expires_at) < new Date() ? 'Expiré' : 'En attente'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="bg-steel-50 rounded-lg p-4 text-center">
+                <p className="text-sm text-steel-400">Aucun code OTP généré</p>
+              </div>
+            )}
+          </div>
         </div>
 
+        {/* Footer actions */}
         <div className="p-6 border-t border-steel-200 flex gap-3">
-          <button
-            onClick={onClose}
-            className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors"
-          >
+          <button onClick={onClose} className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors">
             Fermer
           </button>
           <button
-            onClick={toggleActive}
-            disabled={toggling}
+            onClick={toggleActive} disabled={toggling}
             className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
               isActive
                 ? 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200'
@@ -428,6 +688,7 @@ export default function DashboardPage() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [selectedSchool, setSelectedSchool] = useState(null)
   const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
   const router = useRouter()
 
   const fetchSchools = useCallback(async () => {
@@ -443,12 +704,7 @@ export default function DashboardPage() {
     async function checkAuth() {
       const supabase = getSupabase()
       const { data: { session } } = await supabase.auth.getSession()
-
-      if (!session) {
-        router.push('/login')
-        return
-      }
-
+      if (!session) { router.push('/login'); return }
       setUser(session.user)
       setLoading(false)
       fetchSchools()
@@ -470,11 +726,17 @@ export default function DashboardPage() {
     )
   }
 
-  const filtered = schools.filter(s =>
-    s.school_name.toLowerCase().includes(search.toLowerCase()) ||
-    s.school_code.toLowerCase().includes(search.toLowerCase()) ||
-    s.director_name.toLowerCase().includes(search.toLowerCase())
-  )
+  const filtered = schools.filter(s => {
+    const matchesSearch = s.school_name.toLowerCase().includes(search.toLowerCase()) ||
+      s.school_code.toLowerCase().includes(search.toLowerCase()) ||
+      s.director_name.toLowerCase().includes(search.toLowerCase())
+    if (!matchesSearch) return false
+    if (statusFilter === 'all') return true
+    if (statusFilter === 'active') return s.status === 'active'
+    if (statusFilter === 'pending') return s.status === 'pending_activation'
+    if (statusFilter === 'suspended') return s.status === 'suspended' || s.status === 'deactivated'
+    return true
+  })
 
   const stats = {
     total: schools.length,
@@ -488,7 +750,6 @@ export default function DashboardPage() {
       <Sidebar onLogout={handleLogout} />
 
       <main className="flex-1 p-8">
-        {/* Header */}
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-xl font-medium text-steel-900">Écoles</h1>
@@ -505,33 +766,35 @@ export default function DashboardPage() {
           </button>
         </div>
 
-        {/* Stats */}
         <div className="grid grid-cols-4 gap-4 mb-6">
           {[
-            { label: 'Total', value: stats.total, color: 'text-steel-900' },
-            { label: 'Actifs', value: stats.active, color: 'text-brand' },
-            { label: 'En attente', value: stats.pending, color: 'text-yellow-600' },
-            { label: 'Suspendus', value: stats.suspended, color: 'text-red-500' },
+            { label: 'Total', value: stats.total, color: 'text-steel-900', filter: 'all' },
+            { label: 'Actifs', value: stats.active, color: 'text-brand', filter: 'active' },
+            { label: 'En attente', value: stats.pending, color: 'text-yellow-600', filter: 'pending' },
+            { label: 'Suspendus', value: stats.suspended, color: 'text-red-500', filter: 'suspended' },
           ].map(stat => (
-            <div key={stat.label} className="bg-white rounded-xl border border-steel-200 p-4">
+            <button
+              key={stat.label}
+              onClick={() => setStatusFilter(statusFilter === stat.filter ? 'all' : stat.filter)}
+              className={`bg-white rounded-xl border p-4 text-left transition-colors ${
+                statusFilter === stat.filter ? 'border-brand ring-1 ring-brand' : 'border-steel-200 hover:border-steel-300'
+              }`}
+            >
               <p className="text-sm text-steel-500">{stat.label}</p>
               <p className={`text-2xl font-medium mt-1 ${stat.color}`}>{stat.value}</p>
-            </div>
+            </button>
           ))}
         </div>
 
-        {/* Search */}
         <div className="mb-4">
           <input
             type="text"
             placeholder="Rechercher une école, un code ou un directeur..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={search} onChange={(e) => setSearch(e.target.value)}
             className="w-full max-w-md px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand"
           />
         </div>
 
-        {/* Table */}
         <div className="bg-white rounded-xl border border-steel-200 overflow-hidden">
           <table className="w-full text-sm">
             <thead>
@@ -548,18 +811,12 @@ export default function DashboardPage() {
               {filtered.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-12 text-center text-steel-400">
-                    {schools.length === 0
-                      ? 'Aucune école enregistrée'
-                      : 'Aucun résultat pour cette recherche'}
+                    {schools.length === 0 ? 'Aucune école enregistrée' : 'Aucun résultat pour cette recherche'}
                   </td>
                 </tr>
               ) : (
                 filtered.map(school => (
-                  <tr
-                    key={school.id}
-                    onClick={() => setSelectedSchool(school)}
-                    className="border-b border-steel-100 hover:bg-steel-50 cursor-pointer transition-colors"
-                  >
+                  <tr key={school.id} onClick={() => setSelectedSchool(school)} className="border-b border-steel-100 hover:bg-steel-50 cursor-pointer transition-colors">
                     <td className="px-4 py-3 font-mono text-brand-600 font-medium">{school.school_code}</td>
                     <td className="px-4 py-3 text-steel-800">{school.school_name}</td>
                     <td className="px-4 py-3 text-steel-600">{school.director_name}</td>
@@ -581,17 +838,8 @@ export default function DashboardPage() {
         </div>
       </main>
 
-      <AddSchoolModal
-        open={showAddModal}
-        onClose={() => setShowAddModal(false)}
-        onCreated={fetchSchools}
-      />
-
-      <SchoolDetail
-        school={selectedSchool}
-        onClose={() => setSelectedSchool(null)}
-        onUpdated={fetchSchools}
-      />
+      <AddSchoolModal open={showAddModal} onClose={() => setShowAddModal(false)} onCreated={fetchSchools} />
+      <SchoolDetail school={selectedSchool} onClose={() => setSelectedSchool(null)} onUpdated={fetchSchools} />
     </div>
   )
 }
