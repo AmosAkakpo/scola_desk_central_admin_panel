@@ -333,52 +333,34 @@ function AddSchoolModal({ open, onClose, onCreated }) {
 function SchoolDetail({ school, onClose, onUpdated }) {
   const [toggling, setToggling] = useState(false)
   const [hwBinding, setHwBinding] = useState(null)
-  const [otpHistory, setOtpHistory] = useState([])
   const [lastSync, setLastSync] = useState(null)
   const [loadingExtra, setLoadingExtra] = useState(true)
-  const [generatingOtp, setGeneratingOtp] = useState(false)
-  const [newOtpCode, setNewOtpCode] = useState(null)
+  const [unbinding, setUnbinding] = useState(false)
 
   async function loadDetails() {
     setLoadingExtra(true)
     const supabase = getSupabase()
-
-    const [hwRes, otpRes, syncRes] = await Promise.all([
+    const [hwRes, syncRes] = await Promise.all([
       supabase.from('hardware_bindings').select('*').eq('school_id', school.id).maybeSingle(),
-      supabase.from('otp_codes').select('*').eq('school_id', school.id).order('created_at', { ascending: false }).limit(5),
       supabase.from('sync_log').select('*').eq('school_id', school.id).order('created_at', { ascending: false }).limit(1).maybeSingle(),
     ])
-
     setHwBinding(hwRes.data)
-    setOtpHistory(otpRes.data || [])
     setLastSync(syncRes.data)
     setLoadingExtra(false)
   }
 
   useEffect(() => {
     if (!school) return
-    setNewOtpCode(null)
     loadDetails()
   }, [school])
 
-  async function generateOtp() {
-    setGeneratingOtp(true)
-    setNewOtpCode(null)
+  async function unbindHardware() {
+    if (!hwBinding) return
+    setUnbinding(true)
     const supabase = getSupabase()
-
-    const code = String(Math.floor(100000 + Math.random() * 900000))
-
-    const { error } = await supabase.from('otp_codes').insert({
-      school_id: school.id,
-      code,
-      channel: 'manual',
-    })
-
-    if (!error) {
-      setNewOtpCode(code)
-      loadDetails()
-    }
-    setGeneratingOtp(false)
+    await supabase.from('hardware_bindings').delete().eq('school_id', school.id)
+    setHwBinding(null)
+    setUnbinding(false)
   }
 
   if (!school) return null
@@ -387,10 +369,8 @@ function SchoolDetail({ school, onClose, onUpdated }) {
     setToggling(true)
     const supabase = getSupabase()
     const newActive = !school.licenses[0]?.is_active
-
     await supabase.from('licenses').update({ is_active: newActive }).eq('school_id', school.id)
     await supabase.from('schools').update({ status: newActive ? 'active' : 'suspended' }).eq('id', school.id)
-
     setToggling(false)
     onUpdated()
     onClose()
@@ -411,8 +391,7 @@ function SchoolDetail({ school, onClose, onUpdated }) {
 
   function daysUntilExpiry() {
     if (!license?.expiry_date) return null
-    const diff = Math.ceil((new Date(license.expiry_date) - new Date()) / (1000 * 60 * 60 * 24))
-    return diff
+    return Math.ceil((new Date(license.expiry_date) - new Date()) / (1000 * 60 * 60 * 24))
   }
 
   const expiryDays = daysUntilExpiry()
@@ -420,7 +399,6 @@ function SchoolDetail({ school, onClose, onUpdated }) {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] overflow-y-auto">
-        {/* Header */}
         <div className="p-6 border-b border-steel-200 flex items-center justify-between">
           <div>
             <h2 className="text-lg font-medium text-steel-900">{school.school_name}</h2>
@@ -469,6 +447,10 @@ function SchoolDetail({ school, onClose, onUpdated }) {
               <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide mb-3">Licence</h3>
               <div className="bg-steel-50 rounded-lg p-4">
                 <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="col-span-2">
+                    <p className="text-steel-400">Clé de licence</p>
+                    <p className="text-steel-800 font-mono font-medium tracking-wider">{license.license_key || '—'}</p>
+                  </div>
                   <div>
                     <p className="text-steel-400">Plan</p>
                     <p className="text-steel-800 font-medium">
@@ -522,7 +504,18 @@ function SchoolDetail({ school, onClose, onUpdated }) {
 
           {/* Hardware binding */}
           <div>
-            <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide mb-3">Matériel lié</h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide">Matériel lié</h3>
+              {hwBinding && (
+                <button
+                  onClick={unbindHardware}
+                  disabled={unbinding}
+                  className="px-3 py-1.5 text-xs font-medium text-red-500 hover:bg-red-50 disabled:opacity-50 rounded-lg transition-colors border border-red-200"
+                >
+                  {unbinding ? 'Déliaison...' : 'Délier le matériel'}
+                </button>
+              )}
+            </div>
             {loadingExtra ? (
               <p className="text-sm text-steel-400">Chargement...</p>
             ) : hwBinding ? (
@@ -540,12 +533,6 @@ function SchoolDetail({ school, onClose, onUpdated }) {
                     <p className="text-steel-400">Re-liaisons</p>
                     <p className="text-steel-800">{hwBinding.rebound_count || 0} fois</p>
                   </div>
-                  {hwBinding.previous_fingerprint && (
-                    <div className="col-span-2">
-                      <p className="text-steel-400">Empreinte précédente</p>
-                      <p className="text-steel-600 font-mono text-xs break-all">{hwBinding.previous_fingerprint}</p>
-                    </div>
-                  )}
                 </div>
               </div>
             ) : (
@@ -591,69 +578,6 @@ function SchoolDetail({ school, onClose, onUpdated }) {
             ) : (
               <div className="bg-steel-50 rounded-lg p-4 text-center">
                 <p className="text-sm text-steel-400">Aucune synchronisation effectuée</p>
-              </div>
-            )}
-          </div>
-
-          {/* OTP section */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide">Historique OTP</h3>
-              {school.status === 'pending_activation' && (
-                <button
-                  onClick={generateOtp}
-                  disabled={generatingOtp}
-                  className="px-3 py-1.5 text-xs font-medium bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg transition-colors"
-                >
-                  {generatingOtp ? 'Génération...' : 'Générer un OTP'}
-                </button>
-              )}
-            </div>
-
-            {newOtpCode && (
-              <div className="bg-brand-50 border border-brand-100 rounded-lg p-4 mb-3 text-center">
-                <p className="text-xs text-brand-600 mb-1">Code OTP généré — à communiquer au directeur</p>
-                <p className="text-3xl font-mono font-bold text-brand tracking-widest">{newOtpCode}</p>
-                <p className="text-xs text-steel-400 mt-2">Expire dans 10 minutes</p>
-              </div>
-            )}
-
-            {loadingExtra ? (
-              <p className="text-sm text-steel-400">Chargement...</p>
-            ) : otpHistory.length > 0 ? (
-              <div className="bg-steel-50 rounded-lg overflow-hidden">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-steel-200">
-                      <th className="text-left px-3 py-2 text-steel-400 font-medium">Code</th>
-                      <th className="text-left px-3 py-2 text-steel-400 font-medium">Canal</th>
-                      <th className="text-left px-3 py-2 text-steel-400 font-medium">Créé</th>
-                      <th className="text-left px-3 py-2 text-steel-400 font-medium">Statut</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {otpHistory.map(otp => (
-                      <tr key={otp.id} className="border-b border-steel-100">
-                        <td className="px-3 py-2 font-mono text-steel-700">{otp.code}</td>
-                        <td className="px-3 py-2 text-steel-600">{otp.channel}</td>
-                        <td className="px-3 py-2 text-steel-600">{formatDateTime(otp.created_at)}</td>
-                        <td className="px-3 py-2">
-                          <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                            otp.is_used ? 'bg-brand-50 text-brand-600' :
-                            new Date(otp.expires_at) < new Date() ? 'bg-steel-200 text-steel-500' :
-                            'bg-yellow-100 text-yellow-700'
-                          }`}>
-                            {otp.is_used ? 'Utilisé' : new Date(otp.expires_at) < new Date() ? 'Expiré' : 'En attente'}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="bg-steel-50 rounded-lg p-4 text-center">
-                <p className="text-sm text-steel-400">Aucun code OTP généré</p>
               </div>
             )}
           </div>
