@@ -1,769 +1,255 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
 import { getSupabase } from '@/lib/supabase'
+import { PageShell, StatusBadge, PaymentBadge, formatDate, formatDateTime, formatXOF, daysUntil } from '@/lib/ui'
 
-const STATUS_LABELS = {
-  pending_activation: 'En attente',
-  active: 'Actif',
-  suspended: 'Suspendu',
-  expired: 'Expiré',
-  deactivated: 'Désactivé',
-}
+// ─── Revenue Bar Chart ───────────────────────────────────────
+function RevenueChart({ schools }) {
+  const [chartTier, setChartTier] = useState('all')
 
-const STATUS_COLORS = {
-  pending_activation: 'bg-yellow-100 text-yellow-800',
-  active: 'bg-brand-50 text-brand-600',
-  suspended: 'bg-red-100 text-red-800',
-  expired: 'bg-steel-200 text-steel-600',
-  deactivated: 'bg-red-100 text-red-700',
-}
-
-// ─── Sidebar ─────────────────────────────────────────────────
-function Sidebar({ onLogout }) {
-  return (
-    <aside className="w-60 bg-steel-800 min-h-screen flex flex-col">
-      <div className="p-5 border-b border-steel-700">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-steel-900 rounded-xl flex items-center justify-center">
-            <span className="text-brand-200 text-lg font-semibold">S</span>
-          </div>
-          <div>
-            <p className="text-steel-200 font-medium text-sm">ScolaDesk</p>
-            <p className="text-steel-500 text-xs">Central admin</p>
-          </div>
-        </div>
-      </div>
-      <nav className="flex-1 p-3 space-y-1">
-        <a href="/" className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-steel-700/50 text-steel-200 text-sm">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-          </svg>
-          Écoles
-        </a>
-        <a href="/pricing" className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-steel-400 hover:text-steel-200 hover:bg-steel-700/50 text-sm transition-colors">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          Tarification
-        </a>
-      </nav>
-      <div className="p-3 border-t border-steel-700">
-        <button onClick={onLogout} className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-steel-400 hover:text-steel-200 hover:bg-steel-700/50 text-sm w-full transition-colors">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-          </svg>
-          Déconnexion
-        </button>
-      </div>
-    </aside>
-  )
-}
-
-// ─── Add School Modal (dynamic pricing from DB) ──────────────
-function AddSchoolModal({ open, onClose, onCreated }) {
-  const [form, setForm] = useState({
-    school_name: '', director_name: '', director_phone: '',
-    director_email: '', city: '', address: '', country: 'Bénin',
-    tier: 'STANDARD', size: 'S', semesters_active: 3,
-  })
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-  const [pricingPlans, setPricingPlans] = useState([])
-  const [countries, setCountries] = useState([])
-
-  useEffect(() => {
-    if (!open) return
-    async function loadPricing() {
-      const supabase = getSupabase()
-      const { data } = await supabase
-        .from('pricing_plans')
-        .select('*')
-        .eq('is_active', true)
-        .order('country')
-      setPricingPlans(data || [])
-      const unique = [...new Set((data || []).map(p => p.country))]
-      setCountries(unique)
-    }
-    loadPricing()
-  }, [open])
-
-  function update(field, value) {
-    setForm(prev => ({ ...prev, [field]: value }))
-  }
-
-  function getPricing() {
-    const plan = pricingPlans.find(
-      p => p.country === form.country && p.tier === form.tier && p.size === form.size
-    )
-    if (!plan) return { setup_fee: 0, annual_fee: 0, currency: 'XOF' }
-    return plan
-  }
-
-  async function handleSubmit(e) {
-    e.preventDefault()
-    setError('')
-    setSaving(true)
-
-    const supabase = getSupabase()
-    const pricing = getPricing()
-
-    const countryPlan = pricingPlans.find(p => p.country === form.country)
-    const countryCode = countryPlan?.country_code || 'BJ'
-
-    const { data: codeResult, error: codeErr } = await supabase.rpc('generate_school_code', { p_country_code: countryCode })
-    if (codeErr) {
-      setError('Erreur de génération du code école')
-      setSaving(false)
-      return
-    }
-
-    const prorated = Math.round(pricing.annual_fee * (form.semesters_active / 3))
-
-    const { data: school, error: schoolErr } = await supabase
-      .from('schools')
-      .insert({
-        school_code: codeResult,
-        school_name: form.school_name.trim(),
-        director_name: form.director_name.trim(),
-        director_phone: form.director_phone.trim() || null,
-        director_email: form.director_email.trim() || null,
-        city: form.city.trim() || null,
-        address: form.address.trim() || null,
-        country: form.country,
-      })
-      .select('id')
-      .single()
-
-    if (schoolErr) {
-      setError('Erreur lors de la création de l\'école')
-      setSaving(false)
-      return
-    }
-
-    const { error: licErr } = await supabase
-      .from('licenses')
-      .insert({
-        school_id: school.id,
-        tier: form.tier,
-        size: form.size,
-        semesters_active: form.semesters_active,
-        setup_fee: pricing.setup_fee,
-        annual_fee: pricing.annual_fee,
-        annual_fee_assigned: prorated,
-      })
-
-    if (licErr) {
-      setError('École créée mais erreur sur la licence')
-      setSaving(false)
-      return
-    }
-
-    setSaving(false)
-    setForm({
-      school_name: '', director_name: '', director_phone: '',
-      director_email: '', city: '', address: '', country: 'Bénin',
-      tier: 'STANDARD', size: 'S', semesters_active: 3,
-    })
-    onCreated()
-    onClose()
-  }
-
-  if (!open) return null
-
-  const pricing = getPricing()
-  const prorated = Math.round(pricing.annual_fee * (form.semesters_active / 3))
-
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b border-steel-200">
-          <h2 className="text-lg font-medium text-steel-900">Ajouter une école</h2>
-        </div>
-
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div>
-            <label className="block text-sm text-steel-600 mb-1">Nom de l'école <span className="text-red-500">*</span></label>
-            <input
-              type="text" required value={form.school_name}
-              onChange={(e) => update('school_name', e.target.value)}
-              className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-steel-600 mb-1">Nom du directeur <span className="text-red-500">*</span></label>
-              <input
-                type="text" required value={form.director_name}
-                onChange={(e) => update('director_name', e.target.value)}
-                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-steel-600 mb-1">Téléphone du directeur</label>
-              <input
-                type="tel" value={form.director_phone}
-                onChange={(e) => update('director_phone', e.target.value)}
-                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand"
-                placeholder="+229 XX XX XX XX"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm text-steel-600 mb-1">Email du directeur</label>
-            <input
-              type="email" value={form.director_email}
-              onChange={(e) => update('director_email', e.target.value)}
-              className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-steel-600 mb-1">Ville</label>
-              <input
-                type="text" value={form.city}
-                onChange={(e) => update('city', e.target.value)}
-                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-steel-600 mb-1">Adresse</label>
-              <input
-                type="text" value={form.address}
-                onChange={(e) => update('address', e.target.value)}
-                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand"
-              />
-            </div>
-          </div>
-
-          <hr className="border-steel-100" />
-
-          {/* Country + License config */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-steel-600 mb-1">Pays <span className="text-red-500">*</span></label>
-              <select
-                value={form.country} onChange={(e) => update('country', e.target.value)}
-                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand bg-white"
-              >
-                {countries.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm text-steel-600 mb-1">Licence <span className="text-red-500">*</span></label>
-              <select
-                value={form.tier} onChange={(e) => update('tier', e.target.value)}
-                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand bg-white"
-              >
-                <option value="STANDARD">Standard</option>
-                <option value="PRO">Pro</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-steel-600 mb-1">Taille <span className="text-red-500">*</span></label>
-              <select
-                value={form.size} onChange={(e) => update('size', e.target.value)}
-                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand bg-white"
-              >
-                <option value="S">Petite (S)</option>
-                <option value="M">Moyenne (M)</option>
-                <option value="L">Grande (L)</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm text-steel-600 mb-1">Trimestres <span className="text-red-500">*</span></label>
-              <select
-                value={form.semesters_active} onChange={(e) => update('semesters_active', parseInt(e.target.value))}
-                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand bg-white"
-              >
-                <option value={1}>1 trimestre</option>
-                <option value={2}>2 trimestres</option>
-                <option value={3}>3 trimestres</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Pricing summary */}
-          <div className="bg-steel-50 rounded-lg p-4 space-y-2">
-            <div className="flex justify-between text-sm">
-              <span className="text-steel-500">Frais d'installation</span>
-              <span className="text-steel-800 font-medium">{pricing.setup_fee.toLocaleString('fr-FR')} {pricing.currency}</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-steel-500">Licence annuelle</span>
-              <span className="text-steel-800 font-medium">{pricing.annual_fee.toLocaleString('fr-FR')} {pricing.currency}</span>
-            </div>
-            {form.semesters_active < 3 && (
-              <div className="flex justify-between text-sm">
-                <span className="text-steel-500">Prorata ({form.semesters_active}/3)</span>
-                <span className="text-brand font-medium">{prorated.toLocaleString('fr-FR')} {pricing.currency}</span>
-              </div>
-            )}
-            <hr className="border-steel-200" />
-            <div className="flex justify-between text-sm font-medium">
-              <span className="text-steel-700">Total à percevoir</span>
-              <span className="text-steel-900">{(pricing.setup_fee + prorated).toLocaleString('fr-FR')} {pricing.currency}</span>
-            </div>
-          </div>
-
-          {error && <p className="text-red-500 text-sm">{error}</p>}
-
-          <div className="flex gap-3 pt-2">
-            <button type="button" onClick={onClose} className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors">
-              Annuler
-            </button>
-            <button type="submit" disabled={saving} className="flex-1 py-2.5 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">
-              {saving ? 'Création...' : 'Créer l\'école'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  )
-}
-
-// ─── School Detail Modal (full operational view) ─────────────
-function SchoolDetail({ school, onClose, onUpdated }) {
-  const [toggling, setToggling] = useState(false)
-  const [hwBinding, setHwBinding] = useState(null)
-  const [lastSync, setLastSync] = useState(null)
-  const [loadingExtra, setLoadingExtra] = useState(true)
-  const [unbinding, setUnbinding] = useState(false)
-
-  async function loadDetails() {
-    setLoadingExtra(true)
-    const supabase = getSupabase()
-    const [hwRes, syncRes] = await Promise.all([
-      supabase.from('hardware_bindings').select('*').eq('school_id', school.id).maybeSingle(),
-      supabase.from('sync_log').select('*').eq('school_id', school.id).order('created_at', { ascending: false }).limit(1).maybeSingle(),
-    ])
-    setHwBinding(hwRes.data)
-    setLastSync(syncRes.data)
-    setLoadingExtra(false)
-  }
-
-  useEffect(() => {
-    if (!school) return
-    loadDetails()
-  }, [school])
-
-  async function unbindHardware() {
-    if (!hwBinding) return
-    setUnbinding(true)
-    const supabase = getSupabase()
-    await supabase.from('hardware_bindings').delete().eq('school_id', school.id)
-    setHwBinding(null)
-    setUnbinding(false)
-  }
-
-  if (!school) return null
-
-  async function toggleActive() {
-    setToggling(true)
-    const supabase = getSupabase()
-    const newActive = !school.licenses[0]?.is_active
-    await supabase.from('licenses').update({ is_active: newActive }).eq('school_id', school.id)
-    await supabase.from('schools').update({ status: newActive ? 'active' : 'suspended' }).eq('id', school.id)
-    setToggling(false)
-    onUpdated()
-    onClose()
-  }
-
-  const license = school.licenses?.[0]
-  const isActive = license?.is_active
-
-  function formatDate(d) {
-    if (!d) return '—'
-    return new Date(d).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
-  }
-
-  function formatDateTime(d) {
-    if (!d) return '—'
-    return new Date(d).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
-  }
-
-  function daysUntilExpiry() {
-    if (!license?.expiry_date) return null
-    return Math.ceil((new Date(license.expiry_date) - new Date()) / (1000 * 60 * 60 * 24))
-  }
-
-  const expiryDays = daysUntilExpiry()
-
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b border-steel-200 flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-medium text-steel-900">{school.school_name}</h2>
-            <p className="text-sm text-steel-500 mt-0.5 font-mono">{school.school_code}</p>
-          </div>
-          <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${STATUS_COLORS[school.status]}`}>
-            {STATUS_LABELS[school.status]}
-          </span>
-        </div>
-
-        <div className="p-6 space-y-5">
-          {/* School info */}
-          <div>
-            <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide mb-3">Informations</h3>
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <p className="text-steel-400">Directeur</p>
-                <p className="text-steel-800 font-medium">{school.director_name}</p>
-              </div>
-              <div>
-                <p className="text-steel-400">Téléphone</p>
-                <p className="text-steel-800">{school.director_phone || '—'}</p>
-              </div>
-              <div>
-                <p className="text-steel-400">Ville</p>
-                <p className="text-steel-800">{school.city || '—'}</p>
-              </div>
-              <div>
-                <p className="text-steel-400">Email</p>
-                <p className="text-steel-800">{school.director_email || '—'}</p>
-              </div>
-              <div>
-                <p className="text-steel-400">Pays</p>
-                <p className="text-steel-800">{school.country || '—'}</p>
-              </div>
-              <div>
-                <p className="text-steel-400">Inscrit le</p>
-                <p className="text-steel-800">{formatDate(school.created_at)}</p>
-              </div>
-            </div>
-          </div>
-
-          {/* License plan */}
-          {license && (
-            <div>
-              <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide mb-3">Licence</h3>
-              <div className="bg-steel-50 rounded-lg p-4">
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div className="col-span-2">
-                    <p className="text-steel-400">Clé de licence</p>
-                    <p className="text-steel-800 font-mono font-medium tracking-wider">{license.license_key || '—'}</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Plan</p>
-                    <p className="text-steel-800 font-medium">
-                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium mr-1 ${
-                        license.tier === 'PRO' ? 'bg-brand-50 text-brand-600' : 'bg-steel-200 text-steel-600'
-                      }`}>{license.tier}</span>
-                      {license.size === 'S' ? 'Petite' : license.size === 'M' ? 'Moyenne' : 'Grande'}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Trimestres actifs</p>
-                    <p className="text-steel-800">{license.semesters_active}/3</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Frais d'installation</p>
-                    <p className="text-steel-800">{license.setup_fee?.toLocaleString('fr-FR')} XOF</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Licence annuelle</p>
-                    <p className="text-steel-800">{license.annual_fee?.toLocaleString('fr-FR')} XOF</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Montant facturé</p>
-                    <p className="text-steel-800 font-medium">{(license.annual_fee_assigned || license.annual_fee)?.toLocaleString('fr-FR')} XOF</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Date d'expiration</p>
-                    <p className={`font-medium ${expiryDays !== null && expiryDays < 30 ? 'text-red-500' : 'text-steel-800'}`}>
-                      {formatDate(license.expiry_date)}
-                      {expiryDays !== null && (
-                        <span className="text-xs ml-1 text-steel-400">
-                          ({expiryDays > 0 ? `${expiryDays}j restants` : 'expiré'})
-                        </span>
-                      )}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Activé le</p>
-                    <p className="text-steel-800">{license.activated_at ? formatDateTime(license.activated_at) : 'Non activé'}</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Statut licence</p>
-                    <p className={`font-medium ${isActive ? 'text-brand' : 'text-red-500'}`}>
-                      {isActive ? 'Active' : 'Désactivée'}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Hardware binding */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide">Matériel lié</h3>
-              {hwBinding && (
-                <button
-                  onClick={unbindHardware}
-                  disabled={unbinding}
-                  className="px-3 py-1.5 text-xs font-medium text-red-500 hover:bg-red-50 disabled:opacity-50 rounded-lg transition-colors border border-red-200"
-                >
-                  {unbinding ? 'Déliaison...' : 'Délier le matériel'}
-                </button>
-              )}
-            </div>
-            {loadingExtra ? (
-              <p className="text-sm text-steel-400">Chargement...</p>
-            ) : hwBinding ? (
-              <div className="bg-steel-50 rounded-lg p-4">
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div className="col-span-2">
-                    <p className="text-steel-400">Empreinte matérielle</p>
-                    <p className="text-steel-800 font-mono text-xs break-all">{hwBinding.fingerprint}</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Lié le</p>
-                    <p className="text-steel-800">{formatDateTime(hwBinding.bound_at)}</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Re-liaisons</p>
-                    <p className="text-steel-800">{hwBinding.rebound_count || 0} fois</p>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="bg-steel-50 rounded-lg p-4 text-center">
-                <p className="text-sm text-steel-400">Aucun matériel lié — en attente d'activation</p>
-              </div>
-            )}
-          </div>
-
-          {/* Last sync */}
-          <div>
-            <h3 className="text-xs font-medium text-steel-400 uppercase tracking-wide mb-3">Dernière synchronisation</h3>
-            {loadingExtra ? (
-              <p className="text-sm text-steel-400">Chargement...</p>
-            ) : lastSync ? (
-              <div className="bg-steel-50 rounded-lg p-4">
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div>
-                    <p className="text-steel-400">Date</p>
-                    <p className="text-steel-800">{formatDateTime(lastSync.started_at)}</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Statut</p>
-                    <p className={`font-medium ${
-                      lastSync.status === 'success' ? 'text-brand' :
-                      lastSync.status === 'failed' ? 'text-red-500' : 'text-yellow-600'
-                    }`}>
-                      {lastSync.status === 'success' ? 'Réussi' :
-                       lastSync.status === 'failed' ? 'Échoué' :
-                       lastSync.status === 'partial' ? 'Partiel' : 'En cours'}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Envoyés</p>
-                    <p className="text-steel-800">{lastSync.records_sent}</p>
-                  </div>
-                  <div>
-                    <p className="text-steel-400">Reçus</p>
-                    <p className="text-steel-800">{lastSync.records_received}</p>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="bg-steel-50 rounded-lg p-4 text-center">
-                <p className="text-sm text-steel-400">Aucune synchronisation effectuée</p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Footer actions */}
-        <div className="p-6 border-t border-steel-200 flex gap-3">
-          <button onClick={onClose} className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors">
-            Fermer
-          </button>
-          <button
-            onClick={toggleActive} disabled={toggling}
-            className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
-              isActive
-                ? 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200'
-                : 'bg-brand hover:bg-brand-600 text-white'
-            }`}
-          >
-            {toggling ? '...' : isActive ? 'Désactiver' : 'Réactiver'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ─── Main Dashboard ──────────────────────────────────────────
-export default function DashboardPage() {
-  const [user, setUser] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [schools, setSchools] = useState([])
-  const [showAddModal, setShowAddModal] = useState(false)
-  const [selectedSchool, setSelectedSchool] = useState(null)
-  const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState('all')
-  const router = useRouter()
-
-  const fetchSchools = useCallback(async () => {
-    const supabase = getSupabase()
-    const { data } = await supabase
-      .from('schools')
-      .select('*, licenses(*)')
-      .order('created_at', { ascending: false })
-    setSchools(data || [])
-  }, [])
-
-  useEffect(() => {
-    async function checkAuth() {
-      const supabase = getSupabase()
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) { router.push('/login'); return }
-      setUser(session.user)
-      setLoading(false)
-      fetchSchools()
-    }
-    checkAuth()
-  }, [router, fetchSchools])
-
-  async function handleLogout() {
-    const supabase = getSupabase()
-    await supabase.auth.signOut()
-    router.push('/login')
-  }
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-steel-50">
-        <div className="w-8 h-8 border-2 border-brand border-t-transparent rounded-full animate-spin" />
-      </div>
-    )
-  }
-
-  const filtered = schools.filter(s => {
-    const matchesSearch = s.school_name.toLowerCase().includes(search.toLowerCase()) ||
-      s.school_code.toLowerCase().includes(search.toLowerCase()) ||
-      s.director_name.toLowerCase().includes(search.toLowerCase())
-    if (!matchesSearch) return false
-    if (statusFilter === 'all') return true
-    if (statusFilter === 'active') return s.status === 'active'
-    if (statusFilter === 'pending') return s.status === 'pending_activation'
-    if (statusFilter === 'suspended') return s.status === 'suspended' || s.status === 'deactivated'
-    return true
+  const yearMap = {}
+  schools.forEach(s => {
+    if (chartTier !== 'all' && s.tier !== chartTier) return
+    const year = s.created_at ? new Date(s.created_at).getFullYear() : null
+    if (!year) return
+    yearMap[year] = (yearMap[year] || 0) + (s.payment?.total_paid || 0)
   })
 
-  const stats = {
-    total: schools.length,
-    active: schools.filter(s => s.status === 'active').length,
-    pending: schools.filter(s => s.status === 'pending_activation').length,
-    suspended: schools.filter(s => s.status === 'suspended' || s.status === 'deactivated').length,
-  }
+  const years = Object.keys(yearMap).sort()
+  const maxVal = Math.max(...Object.values(yearMap), 1)
 
   return (
-    <div className="flex min-h-screen">
-      <Sidebar onLogout={handleLogout} />
-
-      <main className="flex-1 p-8">
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <h1 className="text-xl font-medium text-steel-900">Écoles</h1>
-            <p className="text-sm text-steel-500 mt-1">Gestion des établissements et licences</p>
-          </div>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="px-4 py-2.5 bg-brand hover:bg-brand-600 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            Ajouter une école
-          </button>
-        </div>
-
-        <div className="grid grid-cols-4 gap-4 mb-6">
-          {[
-            { label: 'Total', value: stats.total, color: 'text-steel-900', filter: 'all' },
-            { label: 'Actifs', value: stats.active, color: 'text-brand', filter: 'active' },
-            { label: 'En attente', value: stats.pending, color: 'text-yellow-600', filter: 'pending' },
-            { label: 'Suspendus', value: stats.suspended, color: 'text-red-500', filter: 'suspended' },
-          ].map(stat => (
-            <button
-              key={stat.label}
-              onClick={() => setStatusFilter(statusFilter === stat.filter ? 'all' : stat.filter)}
-              className={`bg-white rounded-xl border p-4 text-left transition-colors ${
-                statusFilter === stat.filter ? 'border-brand ring-1 ring-brand' : 'border-steel-200 hover:border-steel-300'
-              }`}
-            >
-              <p className="text-sm text-steel-500">{stat.label}</p>
-              <p className={`text-2xl font-medium mt-1 ${stat.color}`}>{stat.value}</p>
+    <div className="bg-white rounded-xl border border-steel-200 p-6 mb-6">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-medium text-steel-700">Revenue par année</h2>
+        <div className="flex gap-1">
+          {['all', 'STANDARD', 'PRO'].map(t => (
+            <button key={t} onClick={() => setChartTier(t)}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${chartTier === t ? 'bg-brand text-white' : 'text-steel-500 hover:bg-steel-100'}`}>
+              {t === 'all' ? 'Tous' : t === 'STANDARD' ? 'Standard' : 'Pro'}
             </button>
           ))}
         </div>
-
-        <div className="mb-4">
-          <input
-            type="text"
-            placeholder="Rechercher une école, un code ou un directeur..."
-            value={search} onChange={(e) => setSearch(e.target.value)}
-            className="w-full max-w-md px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand"
-          />
+      </div>
+      {years.length === 0 ? (
+        <div className="h-32 flex items-center justify-center">
+          <p className="text-sm text-steel-400">Aucune donnée pour ce filtre</p>
         </div>
+      ) : (
+        <div className="flex items-end gap-4 h-32">
+          {years.map(year => {
+            const val = yearMap[year]
+            const pct = (val / maxVal) * 100
+            return (
+              <div key={year} className="flex-1 flex flex-col items-center gap-1">
+                <span className="text-xs text-steel-500">{formatXOF(val)}</span>
+                <div className="w-full bg-steel-100 rounded-t relative" style={{ height: '100px' }}>
+                  <div className="absolute bottom-0 w-full bg-brand rounded-t transition-all" style={{ height: `${pct}%` }} />
+                </div>
+                <span className="text-xs text-steel-600 font-medium">{year}</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
 
-        <div className="bg-white rounded-xl border border-steel-200 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-steel-200 bg-steel-50">
-                <th className="text-left px-4 py-3 text-steel-500 font-medium">Code</th>
-                <th className="text-left px-4 py-3 text-steel-500 font-medium">École</th>
-                <th className="text-left px-4 py-3 text-steel-500 font-medium">Directeur</th>
-                <th className="text-left px-4 py-3 text-steel-500 font-medium">Ville</th>
-                <th className="text-left px-4 py-3 text-steel-500 font-medium">Licence</th>
-                <th className="text-left px-4 py-3 text-steel-500 font-medium">Statut</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-steel-400">
-                    {schools.length === 0 ? 'Aucune école enregistrée' : 'Aucun résultat pour cette recherche'}
+// ─── Dashboard ───────────────────────────────────────────────
+export default function DashboardPage() {
+  const [schools, setSchools] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [tierFilter, setTierFilter] = useState('all')
+  const [sizeFilter, setSizeFilter] = useState('all')
+  const [paymentFilter, setPaymentFilter] = useState('all')
+  const [search, setSearch] = useState('')
+
+  const fetchData = useCallback(async () => {
+    const supabase = getSupabase()
+    const { data } = await supabase.from('school_active_license').select('*').order('created_at', { ascending: false })
+    let enriched = data || []
+
+    const { data: payments } = await supabase.from('license_payment_summary').select('*')
+    const payMap = {}
+    ;(payments || []).forEach(p => { payMap[p.license_id] = p })
+    enriched = enriched.map(s => ({ ...s, payment: payMap[s.id] || null }))
+
+    setSchools(enriched)
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { fetchData() }, [fetchData])
+
+  // Stats
+  const total = schools.length
+  const active = schools.filter(s => s.status === 'ACTIVE').length
+  const totalRevenue = schools.reduce((sum, s) => sum + (s.payment?.total_paid || 0), 0)
+  const totalUnpaid = schools.reduce((sum, s) => sum + Math.max(0, s.payment?.balance || 0), 0)
+  const expiring = schools.filter(s => { const d = daysUntil(s.expiry_date); return d !== null && d <= 30 && d > 0 }).length
+  const partialPay = schools.filter(s => s.payment?.payment_status === 'partial').length
+  const suspended = schools.filter(s => s.status === 'SUSPENDED').length
+  const pending = schools.filter(s => s.status === 'PENDING_ACTIVATION').length
+
+  // Filters
+  const filtered = schools.filter(s => {
+    if (search) {
+      const q = search.toLowerCase()
+      if (!s.school_name?.toLowerCase().includes(q) && !s.school_code?.toLowerCase().includes(q) && !s.director_name?.toLowerCase().includes(q)) return false
+    }
+    if (statusFilter !== 'all') {
+      if (statusFilter === 'expiring') { const d = daysUntil(s.expiry_date); if (d === null || d > 30 || d <= 0) return false }
+      else if (s.status !== statusFilter) return false
+    }
+    if (tierFilter !== 'all' && s.tier !== tierFilter) return false
+    if (sizeFilter !== 'all' && s.size !== sizeFilter) return false
+    if (paymentFilter !== 'all' && s.payment?.payment_status !== paymentFilter) return false
+    return true
+  })
+
+  async function quickToggle(school) {
+    const supabase = getSupabase()
+    const newStatus = school.status === 'SUSPENDED' ? 'ACTIVE' : 'SUSPENDED'
+    await supabase.from('licenses').update({ status: newStatus, is_active: newStatus === 'ACTIVE' }).eq('id', school.id)
+    fetchData()
+  }
+
+  function resetFilters() {
+    setStatusFilter('all'); setTierFilter('all'); setSizeFilter('all'); setPaymentFilter('all'); setSearch('')
+  }
+
+  const hasFilters = statusFilter !== 'all' || tierFilter !== 'all' || sizeFilter !== 'all' || paymentFilter !== 'all' || search
+
+  return (
+    <PageShell>
+      {/* Metric Cards */}
+      <div className="grid grid-cols-4 gap-4 mb-4">
+        {[
+          { label: 'Total écoles', value: total, color: 'text-steel-900', filter: 'all' },
+          { label: 'Actives cette année', value: active, color: 'text-brand', filter: 'ACTIVE' },
+          { label: 'Revenue total', value: formatXOF(totalRevenue), color: 'text-brand', filter: null },
+          { label: 'Impayés totaux', value: formatXOF(totalUnpaid), color: totalUnpaid > 0 ? 'text-red-500' : 'text-brand', filter: null },
+        ].map(c => (
+          <button key={c.label} onClick={() => c.filter !== null && setStatusFilter(statusFilter === c.filter ? 'all' : c.filter)} disabled={c.filter === null}
+            className={`bg-white rounded-xl border p-4 text-left transition-colors ${statusFilter === c.filter ? 'border-brand ring-1 ring-brand' : 'border-steel-200 hover:border-steel-300'} ${c.filter === null ? 'cursor-default' : ''}`}>
+            <p className="text-xs text-steel-500">{c.label}</p>
+            <p className={`text-xl font-medium mt-1 ${c.color}`}>{c.value}</p>
+          </button>
+        ))}
+      </div>
+
+      {/* Alert Cards */}
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        {[
+          { label: 'Expirent ≤30j', value: expiring, color: 'text-yellow-600', bg: 'bg-yellow-50 border-yellow-200', filter: 'expiring' },
+          { label: 'Paiement partiel', value: partialPay, color: 'text-yellow-600', bg: 'bg-yellow-50 border-yellow-200', pFilter: 'partial' },
+          { label: 'Suspendues', value: suspended, color: 'text-red-600', bg: 'bg-red-50 border-red-200', filter: 'SUSPENDED' },
+          { label: 'En attente', value: pending, color: 'text-steel-600', bg: 'bg-steel-50 border-steel-200', filter: 'PENDING_ACTIVATION' },
+        ].map(c => (
+          <button key={c.label} onClick={() => {
+            if (c.pFilter) { setPaymentFilter(paymentFilter === c.pFilter ? 'all' : c.pFilter); setStatusFilter('all') }
+            else { setStatusFilter(statusFilter === c.filter ? 'all' : c.filter); setPaymentFilter('all') }
+          }}
+            className={`rounded-xl border p-3 text-left transition-colors ${
+              (statusFilter === c.filter || paymentFilter === c.pFilter) ? 'ring-1 ring-brand border-brand' : c.bg
+            }`}>
+            <p className="text-xs text-steel-500">{c.label}</p>
+            <p className={`text-lg font-medium ${c.color}`}>{c.value}</p>
+          </button>
+        ))}
+      </div>
+
+      {/* Revenue Chart */}
+      <RevenueChart schools={schools} />
+
+      {/* Filters + Search */}
+      <div className="flex gap-3 mb-4 flex-wrap items-center">
+        <input type="text" placeholder="Rechercher..." value={search} onChange={e => setSearch(e.target.value)}
+          className="px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand w-64" />
+        <select value={tierFilter} onChange={e => setTierFilter(e.target.value)}
+          className="px-3 py-2 border border-steel-200 rounded-lg text-sm bg-white focus:outline-none focus:border-brand">
+          <option value="all">Tous les plans</option><option value="STANDARD">Standard</option><option value="PRO">Pro</option>
+        </select>
+        <select value={sizeFilter} onChange={e => setSizeFilter(e.target.value)}
+          className="px-3 py-2 border border-steel-200 rounded-lg text-sm bg-white focus:outline-none focus:border-brand">
+          <option value="all">Toutes tailles</option><option value="SMALL">S</option><option value="MEDIUM">M</option><option value="LARGE">L</option>
+        </select>
+        <select value={paymentFilter} onChange={e => setPaymentFilter(e.target.value)}
+          className="px-3 py-2 border border-steel-200 rounded-lg text-sm bg-white focus:outline-none focus:border-brand">
+          <option value="all">Tous paiements</option><option value="paid">Payé</option><option value="partial">Partiel</option><option value="pending">Impayé</option>
+        </select>
+        {hasFilters && (
+          <button onClick={resetFilters} className="text-xs text-steel-400 hover:text-steel-600">Réinitialiser</button>
+        )}
+      </div>
+
+      {/* School Table */}
+      <div className="bg-white rounded-xl border border-steel-200 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-steel-200 bg-steel-50">
+              <th className="text-left px-4 py-3 text-steel-500 font-medium">École</th>
+              <th className="text-left px-4 py-3 text-steel-500 font-medium">ID</th>
+              <th className="text-left px-4 py-3 text-steel-500 font-medium">Plan</th>
+              <th className="text-right px-4 py-3 text-steel-500 font-medium">Dû</th>
+              <th className="text-right px-4 py-3 text-steel-500 font-medium">Payé</th>
+              <th className="text-left px-4 py-3 text-steel-500 font-medium">Paiement</th>
+              <th className="text-left px-4 py-3 text-steel-500 font-medium">Expiration</th>
+              <th className="text-left px-4 py-3 text-steel-500 font-medium">Statut</th>
+              <th className="text-left px-4 py-3 text-steel-500 font-medium">Dernière sync</th>
+              <th className="text-left px-4 py-3 text-steel-500 font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td colSpan={10} className="px-4 py-12 text-center text-steel-400">Chargement...</td></tr>
+            ) : filtered.length === 0 ? (
+              <tr><td colSpan={10} className="px-4 py-12 text-center text-steel-400">
+                {schools.length === 0 ? 'Aucune école enregistrée' : 'Aucun résultat'}
+              </td></tr>
+            ) : filtered.map(s => {
+              const ed = daysUntil(s.expiry_date)
+              const showRenew = ed !== null && ed <= 30
+              return (
+                <tr key={s.id} className="border-b border-steel-100 hover:bg-steel-50 transition-colors">
+                  <td className="px-4 py-3">
+                    <p className="text-steel-800 font-medium">{s.school_name}</p>
+                    <p className="text-xs text-steel-400">{s.director_name}</p>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs text-brand-600">{s.school_code}</td>
+                  <td className="px-4 py-3">
+                    <span className="text-steel-800">{s.tier}</span>
+                    <span className="text-steel-400 text-xs ml-1">{s.size}</span>
+                  </td>
+                  <td className="px-4 py-3 text-right text-steel-700">{formatXOF(s.total_fee_due)}</td>
+                  <td className="px-4 py-3 text-right text-steel-700">{formatXOF(s.payment?.total_paid || 0)}</td>
+                  <td className="px-4 py-3">{s.payment && <PaymentBadge status={s.payment.payment_status} />}</td>
+                  <td className="px-4 py-3">
+                    <span className={`text-xs ${ed !== null && ed < 30 ? 'text-red-500 font-medium' : 'text-steel-600'}`}>
+                      {formatDate(s.expiry_date)}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3"><StatusBadge status={s.status} /></td>
+                  <td className="px-4 py-3 text-xs text-steel-500">{s.last_sync_at ? formatDateTime(s.last_sync_at) : '—'}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex gap-2">
+                      <a href={`/schools/${s.school_id}`} className="text-xs text-brand hover:text-brand-600 font-medium">Voir</a>
+                      <button onClick={() => quickToggle(s)} className={`text-xs font-medium ${s.status === 'SUSPENDED' ? 'text-brand hover:text-brand-600' : 'text-red-500 hover:text-red-600'}`}>
+                        {s.status === 'SUSPENDED' ? 'Réactiver' : 'Suspendre'}
+                      </button>
+                      {showRenew && (
+                        <a href={`/schools/${s.school_id}`} className="text-xs text-yellow-600 hover:text-yellow-700 font-medium">Renouveler</a>
+                      )}
+                    </div>
                   </td>
                 </tr>
-              ) : (
-                filtered.map(school => (
-                  <tr key={school.id} onClick={() => setSelectedSchool(school)} className="border-b border-steel-100 hover:bg-steel-50 cursor-pointer transition-colors">
-                    <td className="px-4 py-3 font-mono text-brand-600 font-medium">{school.school_code}</td>
-                    <td className="px-4 py-3 text-steel-800">{school.school_name}</td>
-                    <td className="px-4 py-3 text-steel-600">{school.director_name}</td>
-                    <td className="px-4 py-3 text-steel-600">{school.city || '—'}</td>
-                    <td className="px-4 py-3">
-                      <span className="text-steel-800">{school.licenses?.[0]?.tier}</span>
-                      <span className="text-steel-400 ml-1">({school.licenses?.[0]?.size})</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[school.status]}`}>
-                        {STATUS_LABELS[school.status]}
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </main>
-
-      <AddSchoolModal open={showAddModal} onClose={() => setShowAddModal(false)} onCreated={fetchSchools} />
-      <SchoolDetail school={selectedSchool} onClose={() => setSelectedSchool(null)} onUpdated={fetchSchools} />
-    </div>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </PageShell>
   )
 }

@@ -1,63 +1,179 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
-import { createHmac } from 'node:crypto'
+import { createHmac, createHash } from 'node:crypto'
 
 export const runtime = 'nodejs'
 
-const PAYLOAD_SECRET = process.env.LICENSE_PAYLOAD_SECRET || 'scoladesk-v1-secret-change-in-production'
+const PAYLOAD_SECRET = (process.env.LICENSE_PAYLOAD_SECRET || '').trim()
+const RATE_LIMIT_MAX = 5
+const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000 // 1 hour
 
 function getServiceClient() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    process.env.SUPABASE_SERVICE_ROLE_KEY
   )
+}
+
+function verifySecret(request) {
+  const secret = request.headers.get('x-scoladesk-secret')
+  return secret === PAYLOAD_SECRET
+}
+
+function hashKey(plainKey) {
+  return createHash('sha256').update(plainKey).digest('hex')
 }
 
 function signPayload(payload) {
   const json = JSON.stringify(payload)
-  const signature = createHmac('sha256', PAYLOAD_SECRET).update(json).digest('hex')
-  const encoded = Buffer.from(json).toString('base64')
-  return { payload: encoded, signature }
+  return createHmac('sha256', PAYLOAD_SECRET).update(json).digest('hex')
 }
 
+const STANDARD_FEATURES = ['students', 'grades', 'reports', 'promotion']
+const PRO_FEATURES = ['students', 'grades', 'reports', 'promotion', 'finance', 'payments', 'salary', 'expenses', 'bi']
+
 function buildLicensePayload(school, license) {
-  return {
-    school_id: school.id,
-    school_code: school.school_code,
+  const payload = {
+    school_id: school.school_code,
     school_name: school.school_name,
+    school_code: school.school_code,
     director_name: school.director_name,
-    country: school.country,
+    city: school.city,
     tier: license.tier,
     size: license.size,
-    semesters_active: license.semesters_active,
+    features: license.features?.length > 0 ? license.features : (license.tier === 'PRO' ? PRO_FEATURES : STANDARD_FEATURES),
     expiry_date: license.expiry_date,
-    grace_period_days: license.grace_period_days || 15,
-    is_active: license.is_active,
-    setup_fee: license.setup_fee,
-    annual_fee: license.annual_fee,
-    annual_fee_assigned: license.annual_fee_assigned,
-    activated_at: license.activated_at,
+    semesters_active: license.semesters_active,
+    semester_deadlines: {
+      t1: license.semester_1_deadline || null,
+      t2: license.semester_2_deadline || null,
+      t3: license.semester_3_deadline || null,
+    },
     issued_at: new Date().toISOString(),
   }
+  payload.signature = signPayload(payload)
+  return payload
 }
 
 // ─── POST /api/activate ─────────────────────────────────────
-// Single endpoint. Actions: activate, check-key
 export async function POST(request) {
+  if (!verifySecret(request)) {
+    return NextResponse.json(
+      { error: 'INVALID_CREDENTIALS', message: 'Clé ou identifiant invalide' },
+      { status: 401 }
+    )
+  }
+
   try {
     const body = await request.json()
-    const { action } = body
+    const { school_id, license_key, hardware_fingerprint } = body
 
-    if (action === 'activate') {
-      return handleActivate(body)
+    if (!school_id || !license_key || !hardware_fingerprint) {
+      return NextResponse.json(
+        { error: 'MISSING_FIELDS', message: 'school_id, license_key et hardware_fingerprint requis' },
+        { status: 400 }
+      )
     }
-    if (action === 'check-key') {
-      return handleCheckKey(body)
+
+    const supabase = getServiceClient()
+    const keyHash = hashKey(license_key.trim().toUpperCase())
+    // Look up license by hash
+    const { data: license, error: licErr } = await supabase
+      .from('licenses')
+      .select('*, schools(*)')
+      .eq('license_key_hash', keyHash)
+      .single()
+
+    if (licErr || !license) {
+      await incrementFailedAttempts(supabase, school_id)
+      return NextResponse.json(
+        { error: 'INVALID_CREDENTIALS', message: 'Clé ou identifiant invalide' },
+        { status: 401 }
+      )
+    }
+
+    const school = license.schools
+    if (!school || school.school_code !== school_id.trim().toUpperCase()) {
+      await incrementFailedAttempts(supabase, school_id)
+      return NextResponse.json(
+        { error: 'INVALID_CREDENTIALS', message: 'Clé ou identifiant invalide' },
+        { status: 401 }
+      )
+    }
+
+    // Rate limit check
+    if (license.failed_attempts >= RATE_LIMIT_MAX && license.last_failed_at) {
+      const elapsed = Date.now() - new Date(license.last_failed_at).getTime()
+      if (elapsed < RATE_LIMIT_WINDOW_MS) {
+        return NextResponse.json(
+          { error: 'RATE_LIMITED', message: 'Trop de tentatives. Réessayez dans 1 heure.' },
+          { status: 429 }
+        )
+      }
+      // Window expired, reset
+      await supabase.from('licenses').update({ failed_attempts: 0 }).eq('id', license.id)
+    }
+
+    // Status checks
+    if (license.status === 'REVOKED') {
+      return NextResponse.json(
+        { error: 'INVALID_CREDENTIALS', message: 'Clé ou identifiant invalide' },
+        { status: 401 }
+      )
+    }
+
+    if (license.status === 'SUSPENDED' || !license.is_active) {
+      return NextResponse.json(
+        { error: 'LICENSE_SUSPENDED', message: 'Licence suspendue. Contactez ScolaDesk.' },
+        { status: 403 }
+      )
+    }
+
+    const fp = hardware_fingerprint.trim()
+
+    // PENDING_ACTIVATION → first activation, bind hardware
+    if (license.status === 'PENDING_ACTIVATION') {
+      await supabase.from('licenses').update({
+        status: 'ACTIVE',
+        hardware_fingerprint: fp,
+        hardware_bound_at: new Date().toISOString(),
+        failed_attempts: 0,
+      }).eq('id', license.id)
+
+      // Audit log
+      await supabase.from('cap_audit_logs').insert({
+        actor: 'system',
+        action: 'LICENSE_ACTIVATED',
+        entity_type: 'license',
+        entity_id: license.id,
+        new_values: { school_code: school.school_code, fingerprint: fp },
+      })
+
+      const payload = buildLicensePayload(school, license)
+      return NextResponse.json({ payload })
+    }
+
+    // ACTIVE → check hardware match
+    if (license.status === 'ACTIVE') {
+      if (license.hardware_fingerprint === fp) {
+        // Same device — re-activation OK
+        await supabase.from('licenses').update({ failed_attempts: 0 }).eq('id', license.id)
+
+        const payload = buildLicensePayload(school, license)
+        return NextResponse.json({ payload })
+      } else {
+        // Different device — REJECT
+        await incrementFailedAttempts(supabase, school_id, license.id)
+        return NextResponse.json(
+          { error: 'HARDWARE_MISMATCH', message: 'Matériel non autorisé' },
+          { status: 403 }
+        )
+      }
     }
 
     return NextResponse.json(
-      { error: 'INVALID_ACTION', message: 'Action non reconnue' },
-      { status: 400 }
+      { error: 'INVALID_CREDENTIALS', message: 'Clé ou identifiant invalide' },
+      { status: 401 }
     )
   } catch (err) {
     console.error('[ACTIVATE]', err)
@@ -68,123 +184,44 @@ export async function POST(request) {
   }
 }
 
-// ─── Activate: license_key + fingerprint ─────────────────────
-// Three scenarios:
-// 1. Key not yet bound → bind fingerprint, return license (first activation)
-// 2. Key bound + fingerprint matches → return license (re-activation same device)
-// 3. Key bound + fingerprint different → REJECT (different device)
-async function handleActivate({ license_key, fingerprint }) {
-  if (!license_key || !fingerprint) {
-    return NextResponse.json(
-      { error: 'MISSING_FIELDS', message: 'Clé de licence et empreinte matérielle requises' },
-      { status: 400 }
-    )
+async function incrementFailedAttempts(supabase, schoolCode, licenseId) {
+  const now = new Date().toISOString()
+
+  if (licenseId) {
+    const { data } = await supabase
+      .from('licenses')
+      .select('failed_attempts')
+      .eq('id', licenseId)
+      .single()
+
+    await supabase.from('licenses').update({
+      failed_attempts: (data?.failed_attempts || 0) + 1,
+      last_failed_at: now,
+    }).eq('id', licenseId)
+    return
   }
 
-  const supabase = getServiceClient()
-
-  // Find license by key
-  const { data: license, error: licErr } = await supabase
-    .from('licenses')
-    .select('*, schools(*)')
-    .eq('license_key', license_key.trim().toUpperCase())
-    .single()
-
-  if (licErr || !license) {
-    return NextResponse.json(
-      { error: 'INVALID_KEY', message: 'Clé de licence invalide' },
-      { status: 404 }
-    )
-  }
-
-  const school = license.schools
-  if (!school) {
-    return NextResponse.json(
-      { error: 'SCHOOL_NOT_FOUND', message: 'École associée introuvable' },
-      { status: 404 }
-    )
-  }
-
-  if (!license.is_active) {
-    return NextResponse.json(
-      { error: 'LICENSE_INACTIVE', message: 'Cette licence a été désactivée. Contactez ScolaDesk.' },
-      { status: 403 }
-    )
-  }
-
-  // Check hardware binding
-  const { data: binding } = await supabase
-    .from('hardware_bindings')
-    .select('*')
-    .eq('school_id', school.id)
+  const { data: school } = await supabase
+    .from('schools')
+    .select('id')
+    .eq('school_code', schoolCode?.trim()?.toUpperCase())
     .maybeSingle()
 
-  if (binding) {
-    if (binding.fingerprint === fingerprint.trim()) {
-      // Same device — re-activation, return license
-      const payload = buildLicensePayload(school, license)
-      const signed = signPayload(payload)
-      return NextResponse.json({ success: true, type: 'reactivation', ...signed })
-    } else {
-      // Different device — REJECT
-      return NextResponse.json(
-        {
-          error: 'DEVICE_MISMATCH',
-          message: 'Cette licence est liée à un autre appareil. Contactez ScolaDesk pour transférer.',
-        },
-        { status: 403 }
-      )
-    }
-  }
-
-  // Not yet bound — first activation
-  await supabase.from('hardware_bindings').insert({
-    school_id: school.id,
-    fingerprint: fingerprint.trim(),
-  })
-
-  // Update school status + activation timestamp
-  await supabase.from('schools').update({ status: 'active' }).eq('id', school.id)
-  await supabase.from('licenses').update({ activated_at: new Date().toISOString() }).eq('id', license.id)
-
-  const payload = buildLicensePayload(school, license)
-  const signed = signPayload(payload)
-
-  return NextResponse.json({ success: true, type: 'first_activation', ...signed })
-}
-
-// ─── Check Key: validate without activating ──────────────────
-// Used to preview school info before committing
-async function handleCheckKey({ license_key }) {
-  if (!license_key) {
-    return NextResponse.json(
-      { error: 'MISSING_FIELDS', message: 'Clé de licence requise' },
-      { status: 400 }
-    )
-  }
-
-  const supabase = getServiceClient()
+  if (!school) return
 
   const { data: license } = await supabase
     .from('licenses')
-    .select('tier, size, semesters_active, expiry_date, is_active, grace_period_days, license_key, schools(school_name, school_code, director_name, country)')
-    .eq('license_key', license_key.trim().toUpperCase())
-    .single()
+    .select('id, failed_attempts')
+    .eq('school_id', school.id)
+    .in('status', ['ACTIVE', 'PENDING_ACTIVATION'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
 
-  if (!license) {
-    return NextResponse.json(
-      { error: 'INVALID_KEY', message: 'Clé de licence invalide' },
-      { status: 404 }
-    )
+  if (license) {
+    await supabase.from('licenses').update({
+      failed_attempts: (license.failed_attempts || 0) + 1,
+      last_failed_at: now,
+    }).eq('id', license.id)
   }
-
-  return NextResponse.json({
-    success: true,
-    school_name: license.schools?.school_name,
-    school_code: license.schools?.school_code,
-    director_name: license.schools?.director_name,
-    tier: license.tier,
-    size: license.size,
-    is_active: license.is_active,
-  })
 }
