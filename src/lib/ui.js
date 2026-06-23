@@ -65,9 +65,7 @@ export function Sidebar() {
     <aside className="w-60 bg-steel-800 min-h-screen flex flex-col shrink-0">
       <div className="p-5 border-b border-steel-700">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-steel-900 rounded-xl flex items-center justify-center">
-            <span className="text-brand-200 text-lg font-semibold">S</span>
-          </div>
+          <img src="/favicon-32x32.png" alt="ScolaDesk" className="w-9 h-9 rounded-xl" />
           <div>
             <p className="text-steel-200 font-medium text-sm">ScolaDesk</p>
             <p className="text-steel-500 text-xs">Central admin</p>

@@ -48,17 +48,12 @@ function KeyRevealModal({ licenseKey, onConfirm }) {
         </div>
 
         <div className="flex gap-3">
-          <button
-            onClick={handleCopy}
-            className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors"
-          >
+          <button onClick={handleCopy}
+            className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors">
             {copied ? 'Copié !' : 'Copier la clé'}
           </button>
-          <button
-            onClick={onConfirm}
-            disabled={!copied}
-            className="flex-1 py-2.5 bg-brand hover:bg-brand-600 disabled:opacity-30 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
-          >
+          <button onClick={onConfirm} disabled={!copied}
+            className="flex-1 py-2.5 bg-brand hover:bg-brand-600 disabled:opacity-30 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
             J'ai copié →
           </button>
         </div>
@@ -74,7 +69,11 @@ export default function NewSchoolPage() {
 
   const [form, setForm] = useState({
     school_name: '', director_name: '', phone: '', city: '', country: 'Bénin', notes: '',
-    tier: 'STANDARD', size: 'SMALL', semesters_active: 3, fee_override: '',
+    tier: 'STANDARD',
+    declared_student_count: '',
+    rate_per_student: '',
+    installation_fee: '',
+    semesters_active: 3,
     features: [...STANDARD_FEATURES],
     semester_1_deadline: 12, semester_2_deadline: 3, semester_3_deadline: 6,
     engineer: '',
@@ -94,11 +93,33 @@ export default function NewSchoolPage() {
     loadPricing()
   }, [])
 
+  function getCountryPlan() {
+    return pricingPlans.find(p => p.country === form.country && p.tier === form.tier)
+  }
+
+  function getEffectiveRate() {
+    const plan = getCountryPlan()
+    if (form.rate_per_student !== '') return parseInt(form.rate_per_student) || 0
+    return plan?.rate_per_student || 0
+  }
+
+  function getEffectiveInstallation() {
+    const plan = getCountryPlan()
+    if (form.installation_fee !== '') return parseInt(form.installation_fee) || 0
+    return plan?.installation_fee_default || 0
+  }
+
   function update(field, value) {
     setForm(prev => {
       const next = { ...prev, [field]: value }
       if (field === 'tier') {
         next.features = value === 'PRO' ? [...PRO_FEATURES] : [...STANDARD_FEATURES]
+        next.rate_per_student = ''
+        next.installation_fee = ''
+      }
+      if (field === 'country') {
+        next.rate_per_student = ''
+        next.installation_fee = ''
       }
       return next
     })
@@ -111,45 +132,44 @@ export default function NewSchoolPage() {
     })
   }
 
-  function getPricing() {
-    const plan = pricingPlans.find(p => p.country === form.country && p.tier === form.tier && p.size === form.size)
-    return plan || { setup_fee: 0, annual_fee: 0, currency: 'XOF' }
-  }
+  const declaredCount = parseInt(form.declared_student_count) || 0
+  const rate = getEffectiveRate()
+  const installation = getEffectiveInstallation()
+  const projectedAnnual = declaredCount * rate
+  const upfrontTarget = Math.round(projectedAnnual * 0.75)
+  const plan = getCountryPlan()
+  const isRateOverridden = form.rate_per_student !== '' && parseInt(form.rate_per_student) !== (plan?.rate_per_student || 0)
+  const isInstallOverridden = form.installation_fee !== '' && parseInt(form.installation_fee) !== (plan?.installation_fee_default || 0)
 
   async function handleSubmit(e) {
     e.preventDefault()
     setError('')
-    setSaving(true)
 
+    if (declaredCount < 1) { setError('Le nombre d\'élèves déclarés est requis'); return }
+
+    setSaving(true)
     const supabase = getSupabase()
-    const pricing = getPricing()
     const countryPlan = pricingPlans.find(p => p.country === form.country)
     const countryCode = countryPlan?.country_code || 'BJ'
 
-    // Generate school code
     const { data: schoolCode, error: codeErr } = await supabase.rpc('generate_school_code', { p_country_code: countryCode })
-    if (codeErr) { setError('Erreur de génération du code'); setSaving(false); return }
+    if (codeErr || !schoolCode?.[0]) { setError('Erreur de génération du code'); setSaving(false); return }
 
-    // Generate license key
+    const { school_code, school_prefix } = schoolCode[0]
+
     const { data: keyData, error: keyErr } = await supabase.rpc('generate_license_key')
     if (keyErr || !keyData?.[0]) { setError('Erreur de génération de la clé'); setSaving(false); return }
 
     const { plain_key, key_hash, key_preview } = keyData[0]
 
-    // Compute fee
-    const annualFee = pricing.annual_fee
-    const prorated = Math.round(annualFee * (form.semesters_active / 3))
-    const totalFee = form.fee_override ? parseInt(form.fee_override) : (pricing.setup_fee + prorated)
-
-    // Compute expiry
     const { data: expiryData } = await supabase.rpc('compute_expiry_date')
-    const expiryDate = expiryData || new Date(new Date().getFullYear() + '-08-30')
+    const expiryDate = expiryData || new Date().getFullYear() + '-08-30'
 
-    // Insert school
     const { data: school, error: schoolErr } = await supabase
       .from('schools')
       .insert({
-        school_code: schoolCode,
+        school_code,
+        school_prefix,
         school_name: form.school_name.trim(),
         director_name: form.director_name.trim(),
         phone: form.phone.trim() || null,
@@ -163,15 +183,19 @@ export default function NewSchoolPage() {
 
     if (schoolErr) { setError('Erreur lors de la création de l\'école'); setSaving(false); return }
 
-    // Insert license
     const { error: licErr } = await supabase.from('licenses').insert({
       school_id: school.id,
       license_key_hash: key_hash,
       license_key_preview: key_preview,
       tier: form.tier,
-      size: form.size,
+      rate_per_student: rate,
+      declared_student_count: declaredCount,
+      paid_student_count: 0,
+      allowed_students: declaredCount,
+      amount_paid: 0,
+      installation_fee: installation,
+      installation_fee_paid: false,
       semesters_active: form.semesters_active,
-      total_fee_due: totalFee,
       features: form.features,
       semester_1_deadline: form.semester_1_deadline || null,
       semester_2_deadline: form.semester_2_deadline || null,
@@ -182,23 +206,18 @@ export default function NewSchoolPage() {
 
     if (licErr) { setError('École créée mais erreur sur la licence: ' + licErr.message); setSaving(false); return }
 
-    // Audit log
     await supabase.from('cap_audit_logs').insert({
       actor: 'owner',
       action: 'SCHOOL_CREATED',
       entity_type: 'school',
       entity_id: school.id,
-      new_values: { school_code: schoolCode, tier: form.tier, size: form.size },
+      new_values: { school_code, tier: form.tier, declared_student_count: declaredCount, rate_per_student: rate },
     })
 
     setSaving(false)
     setCreatedSchoolId(school.id)
     setRevealKey(plain_key)
   }
-
-  const pricing = getPricing()
-  const prorated = Math.round(pricing.annual_fee * (form.semesters_active / 3))
-  const totalFee = form.fee_override ? parseInt(form.fee_override) : (pricing.setup_fee + prorated)
 
   return (
     <PageShell>
@@ -252,36 +271,68 @@ export default function NewSchoolPage() {
             </div>
           </div>
 
-          {/* Section 2: License */}
+          {/* Section 2: License + Pricing */}
           <div className="bg-white rounded-xl border border-steel-200 p-6 space-y-4">
-            <h2 className="text-sm font-semibold text-steel-700 uppercase tracking-wide">Première licence</h2>
+            <h2 className="text-sm font-semibold text-steel-700 uppercase tracking-wide">Licence et tarification</h2>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm text-steel-600 mb-1">Licence <span className="text-red-500">*</span></label>
-                <div className="flex gap-2">
-                  {['STANDARD', 'PRO'].map(t => (
-                    <button key={t} type="button" onClick={() => update('tier', t)}
-                      className={`flex-1 py-2 rounded-lg border text-sm font-medium transition-colors ${
-                        form.tier === t ? 'border-brand bg-brand-50 text-brand-600' : 'border-steel-200 text-steel-500 hover:border-steel-300'
-                      }`}>{t === 'STANDARD' ? 'Standard' : 'Pro'}</button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm text-steel-600 mb-1">Taille <span className="text-red-500">*</span></label>
-                <div className="flex gap-2">
-                  {['SMALL', 'MEDIUM', 'LARGE'].map(s => (
-                    <button key={s} type="button" onClick={() => update('size', s)}
-                      className={`flex-1 py-2 rounded-lg border text-sm font-medium transition-colors ${
-                        form.size === s ? 'border-brand bg-brand-50 text-brand-600' : 'border-steel-200 text-steel-500 hover:border-steel-300'
-                      }`}>{s === 'SMALL' ? 'S' : s === 'MEDIUM' ? 'M' : 'L'}</button>
-                  ))}
-                </div>
+            {/* Tier */}
+            <div>
+              <label className="block text-sm text-steel-600 mb-1">Licence <span className="text-red-500">*</span></label>
+              <div className="flex gap-2">
+                {['STANDARD', 'PRO'].map(t => (
+                  <button key={t} type="button" onClick={() => update('tier', t)}
+                    className={`flex-1 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                      form.tier === t ? 'border-brand bg-brand-50 text-brand-600' : 'border-steel-200 text-steel-500 hover:border-steel-300'
+                    }`}>{t === 'STANDARD' ? 'Standard' : 'Pro'}</button>
+                ))}
               </div>
             </div>
 
+            {/* Student count + Rate */}
             <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-steel-600 mb-1">Élèves déclarés <span className="text-red-500">*</span></label>
+                <input type="number" min="1" value={form.declared_student_count}
+                  onChange={e => update('declared_student_count', e.target.value)}
+                  placeholder="Ex: 350"
+                  className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand" />
+              </div>
+              <div>
+                <label className="block text-sm text-steel-600 mb-1">
+                  Tarif / élève / an
+                  {isRateOverridden && <span className="text-yellow-600 text-xs ml-1">(personnalisé)</span>}
+                </label>
+                <input type="number" min="0" step="500"
+                  value={form.rate_per_student}
+                  onChange={e => update('rate_per_student', e.target.value)}
+                  placeholder={plan?.rate_per_student?.toString() || '2000'}
+                  className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand ${
+                    isRateOverridden ? 'border-yellow-300 bg-yellow-50' : 'border-steel-200'
+                  }`} />
+                <p className="text-xs text-steel-400 mt-0.5">
+                  Défaut {form.country}: {formatXOF(plan?.rate_per_student || 0)} / élève
+                </p>
+              </div>
+            </div>
+
+            {/* Installation fee */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-steel-600 mb-1">
+                  Frais d'installation
+                  {isInstallOverridden && <span className="text-yellow-600 text-xs ml-1">(personnalisé)</span>}
+                </label>
+                <input type="number" min="0" step="5000"
+                  value={form.installation_fee}
+                  onChange={e => update('installation_fee', e.target.value)}
+                  placeholder={plan?.installation_fee_default?.toString() || '25000'}
+                  className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand ${
+                    isInstallOverridden ? 'border-yellow-300 bg-yellow-50' : 'border-steel-200'
+                  }`} />
+                <p className="text-xs text-steel-400 mt-0.5">
+                  Défaut: {formatXOF(plan?.installation_fee_default || 0)}
+                </p>
+              </div>
               <div>
                 <label className="block text-sm text-steel-600 mb-1">Trimestres <span className="text-red-500">*</span></label>
                 <div className="flex gap-2">
@@ -293,27 +344,32 @@ export default function NewSchoolPage() {
                   ))}
                 </div>
               </div>
-              <div>
-                <label className="block text-sm text-steel-600 mb-1">Montant à facturer (personnalisable)</label>
-                <input type="number" value={form.fee_override} onChange={e => update('fee_override', e.target.value)}
-                  placeholder={totalFee.toString()}
-                  className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand" />
-              </div>
             </div>
 
             {/* Pricing summary */}
-            <div className="bg-steel-50 rounded-lg p-4 space-y-1.5 text-sm">
-              <div className="flex justify-between"><span className="text-steel-500">Installation</span><span className="text-steel-800">{formatXOF(pricing.setup_fee)}</span></div>
-              <div className="flex justify-between"><span className="text-steel-500">Licence annuelle</span><span className="text-steel-800">{formatXOF(pricing.annual_fee)}</span></div>
-              {form.semesters_active < 3 && (
-                <div className="flex justify-between"><span className="text-steel-500">Prorata ({form.semesters_active}/3)</span><span className="text-brand">{formatXOF(prorated)}</span></div>
-              )}
-              <hr className="border-steel-200" />
-              <div className="flex justify-between font-medium">
-                <span className="text-steel-700">Total</span>
-                <span className="text-steel-900">{formatXOF(totalFee)}</span>
+            {declaredCount > 0 && (
+              <div className="bg-steel-50 rounded-lg p-4 space-y-1.5 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-steel-500">{declaredCount} élèves × {formatXOF(rate)}</span>
+                  <span className="text-steel-800">{formatXOF(projectedAnnual)} / an</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-steel-500">75% acompte (objectif oct.)</span>
+                  <span className="text-brand font-medium">{formatXOF(upfrontTarget)}</span>
+                </div>
+                {installation > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-steel-500">Installation (1ère année)</span>
+                    <span className="text-steel-800">{formatXOF(installation)}</span>
+                  </div>
+                )}
+                <hr className="border-steel-200" />
+                <div className="flex justify-between font-medium">
+                  <span className="text-steel-700">Total 1ère année</span>
+                  <span className="text-steel-900">{formatXOF(projectedAnnual + installation)}</span>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Features */}
             <div>
@@ -358,7 +414,7 @@ export default function NewSchoolPage() {
 
           {error && <p className="text-red-500 text-sm">{error}</p>}
 
-          <button type="submit" disabled={saving || !form.school_name || !form.director_name || !form.city}
+          <button type="submit" disabled={saving || !form.school_name || !form.director_name || !form.city || declaredCount < 1}
             className="w-full py-3 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">
             {saving ? 'Création en cours...' : 'Créer l\'école et générer la clé'}
           </button>

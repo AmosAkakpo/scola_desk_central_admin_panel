@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from 'react'
 import { getSupabase } from '@/lib/supabase'
 import { PageShell, formatXOF } from '@/lib/ui'
 
-const SIZE_LABELS = { SMALL: 'Petite (S)', MEDIUM: 'Moyenne (M)', LARGE: 'Grande (L)' }
 const TIER_LABELS = { STANDARD: 'Standard', PRO: 'Pro' }
 
 function AddCountryModal({ open, onClose, onCreated, existingCountries }) {
@@ -26,12 +25,10 @@ function AddCountryModal({ open, onClose, onCreated, existingCountries }) {
     setError('')
     const supabase = getSupabase()
 
-    const rows = []
-    for (const tier of ['STANDARD', 'PRO']) {
-      for (const size of ['SMALL', 'MEDIUM', 'LARGE']) {
-        rows.push({ country: name, country_code: code, tier, size, setup_fee: 0, annual_fee: 0, currency: currency.trim() || 'XOF' })
-      }
-    }
+    const rows = [
+      { country: name, country_code: code, tier: 'STANDARD', rate_per_student: 2000, installation_fee_default: 25000, currency: currency.trim() || 'XOF' },
+      { country: name, country_code: code, tier: 'PRO', rate_per_student: 3000, installation_fee_default: 25000, currency: currency.trim() || 'XOF' },
+    ]
 
     const { error: insertErr } = await supabase.from('pricing_plans').insert(rows)
     if (insertErr) { setError('Erreur lors de la création'); setSaving(false); return }
@@ -92,7 +89,7 @@ export default function PricingPage() {
 
   const fetchPlans = useCallback(async () => {
     const supabase = getSupabase()
-    const { data } = await supabase.from('pricing_plans').select('*').eq('is_active', true).order('country').order('tier').order('size')
+    const { data } = await supabase.from('pricing_plans').select('*').eq('is_active', true).order('country').order('tier')
     setPlans(data || [])
     if (!selectedCountry && data?.length > 0) setSelectedCountry(data[0].country)
   }, [selectedCountry])
@@ -106,7 +103,7 @@ export default function PricingPage() {
 
   function startEditing() {
     const map = {}
-    countryPlans.forEach(p => { map[p.id] = { setup_fee: p.setup_fee, annual_fee: p.annual_fee } })
+    countryPlans.forEach(p => { map[p.id] = { rate_per_student: p.rate_per_student, installation_fee_default: p.installation_fee_default } })
     setEditing(map)
   }
 
@@ -126,7 +123,7 @@ export default function PricingPage() {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-xl font-medium text-steel-900">Tarification</h1>
-          <p className="text-sm text-steel-500 mt-1">Ces tarifs sont des suggestions. Chaque licence peut avoir un montant personnalisé.</p>
+          <p className="text-sm text-steel-500 mt-1">Tarifs par défaut par pays. Le tarif par élève peut être personnalisé par école lors de la création de la licence.</p>
         </div>
         <button onClick={() => setShowAddCountry(true)}
           className="px-4 py-2.5 bg-brand hover:bg-brand-600 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
@@ -169,9 +166,8 @@ export default function PricingPage() {
             <thead>
               <tr className="border-b border-steel-200">
                 <th className="text-left px-4 py-3 text-steel-500 font-medium">Licence</th>
-                <th className="text-left px-4 py-3 text-steel-500 font-medium">Taille</th>
-                <th className="text-right px-4 py-3 text-steel-500 font-medium">Frais d'installation</th>
-                <th className="text-right px-4 py-3 text-steel-500 font-medium">Licence annuelle</th>
+                <th className="text-right px-4 py-3 text-steel-500 font-medium">Tarif par élève / an</th>
+                <th className="text-right px-4 py-3 text-steel-500 font-medium">Frais d'installation (défaut)</th>
               </tr>
             </thead>
             <tbody>
@@ -184,26 +180,38 @@ export default function PricingPage() {
                         {TIER_LABELS[plan.tier]}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-steel-700">{SIZE_LABELS[plan.size]}</td>
                     <td className="px-4 py-3 text-right">
                       {ed ? (
-                        <input type="number" min="0" step="1000" value={ed.setup_fee}
-                          onChange={e => setEditing(prev => ({ ...prev, [plan.id]: { ...prev[plan.id], setup_fee: parseInt(e.target.value) || 0 } }))}
-                          className="w-32 px-2 py-1.5 border border-steel-200 rounded-lg text-sm text-right focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand" />
-                      ) : <span className="text-steel-800">{formatXOF(plan.setup_fee)}</span>}
+                        <div className="flex items-center justify-end gap-1">
+                          <input type="number" min="0" step="500" value={ed.rate_per_student}
+                            onChange={e => setEditing(prev => ({ ...prev, [plan.id]: { ...prev[plan.id], rate_per_student: parseInt(e.target.value) || 0 } }))}
+                            className="w-28 px-2 py-1.5 border border-steel-200 rounded-lg text-sm text-right focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand" />
+                          <span className="text-xs text-steel-400">{countryCurrency}/élève</span>
+                        </div>
+                      ) : <span className="text-steel-800">{formatXOF(plan.rate_per_student)} <span className="text-steel-400 text-xs">/ élève</span></span>}
                     </td>
                     <td className="px-4 py-3 text-right">
                       {ed ? (
-                        <input type="number" min="0" step="1000" value={ed.annual_fee}
-                          onChange={e => setEditing(prev => ({ ...prev, [plan.id]: { ...prev[plan.id], annual_fee: parseInt(e.target.value) || 0 } }))}
-                          className="w-32 px-2 py-1.5 border border-steel-200 rounded-lg text-sm text-right focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand" />
-                      ) : <span className="text-steel-800">{formatXOF(plan.annual_fee)}</span>}
+                        <input type="number" min="0" step="5000" value={ed.installation_fee_default}
+                          onChange={e => setEditing(prev => ({ ...prev, [plan.id]: { ...prev[plan.id], installation_fee_default: parseInt(e.target.value) || 0 } }))}
+                          className="w-28 px-2 py-1.5 border border-steel-200 rounded-lg text-sm text-right focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand" />
+                      ) : <span className="text-steel-800">{formatXOF(plan.installation_fee_default)}</span>}
                     </td>
                   </tr>
                 )
               })}
             </tbody>
           </table>
+
+          {/* Example calculation */}
+          {countryPlans.length > 0 && (
+            <div className="px-4 py-3 bg-steel-50 border-t border-steel-200">
+              <p className="text-xs text-steel-500">
+                Exemple : une école Pro avec 400 élèves → {formatXOF(countryPlans.find(p => p.tier === 'PRO')?.rate_per_student * 400 || 0)} / an
+                + {formatXOF(countryPlans.find(p => p.tier === 'PRO')?.installation_fee_default || 0)} installation (1ère année)
+              </p>
+            </div>
+          )}
         </div>
       )}
 

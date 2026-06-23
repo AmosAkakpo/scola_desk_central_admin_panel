@@ -6,12 +6,14 @@ import { getSupabase } from '@/lib/supabase'
 import { PageShell, StatusBadge, PaymentBadge, formatDate, formatDateTime, formatXOF, daysUntil } from '@/lib/ui'
 
 const ALL_FEATURES = ['students', 'grades', 'reports', 'promotion', 'finance', 'payments', 'salary', 'expenses', 'bi']
+const PAYMENT_METHODS = { especes: 'Espèces', mobile_money: 'Mobile Money', virement: 'Virement', autre: 'Autre' }
 
 export default function SchoolDetailPage() {
   const { id } = useParams()
   const [school, setSchool] = useState(null)
   const [license, setLicense] = useState(null)
   const [payments, setPayments] = useState([])
+  const [discounts, setDiscounts] = useState([])
   const [paymentSummary, setPaymentSummary] = useState(null)
   const [licenseHistory, setLicenseHistory] = useState([])
   const [syncHistory, setSyncHistory] = useState([])
@@ -25,25 +27,28 @@ export default function SchoolDetailPage() {
     setSchool(schoolData)
     if (!schoolData) { setLoading(false); return }
 
-    const [licRes, histRes, syncRes, auditRes] = await Promise.all([
+    const [licRes, syncRes, auditRes] = await Promise.all([
       supabase.from('licenses').select('*').eq('school_id', id).order('created_at', { ascending: false }),
       supabase.from('sync_records').select('*').eq('school_id', id).order('synced_at', { ascending: false }).limit(10),
       supabase.from('cap_audit_logs').select('*').eq('entity_id', id).order('created_at', { ascending: false }).limit(15),
-      supabase.from('license_payment_summary').select('*').eq('school_id', id),
     ])
 
     const allLicenses = licRes.data || []
     const active = allLicenses.find(l => ['ACTIVE', 'PENDING_ACTIVATION', 'SUSPENDED'].includes(l.status))
     setLicense(active || allLicenses[0] || null)
     setLicenseHistory(allLicenses.filter(l => l.status === 'REVOKED'))
-    setSyncHistory(histRes.data || [])
-    setAuditLog(syncRes.data || [])
+    setSyncHistory(syncRes.data || [])
+    setAuditLog(auditRes.data || [])
 
     if (active) {
-      const { data: payData } = await supabase.from('license_payments').select('*').eq('license_id', active.id).order('payment_date', { ascending: false })
-      setPayments(payData || [])
-      const summary = (auditRes.data || []).find(s => s.license_id === active.id)
-      setPaymentSummary(summary || null)
+      const [payRes, discRes, summRes] = await Promise.all([
+        supabase.from('license_payments').select('*').eq('license_id', active.id).order('payment_date', { ascending: false }),
+        supabase.from('license_discounts').select('*').eq('license_id', active.id).order('created_at', { ascending: false }),
+        supabase.from('license_payment_summary').select('*').eq('license_id', active.id).single(),
+      ])
+      setPayments(payRes.data || [])
+      setDiscounts(discRes.data || [])
+      setPaymentSummary(summRes.data || null)
     }
 
     setLoading(false)
@@ -51,20 +56,26 @@ export default function SchoolDetailPage() {
 
   useEffect(() => { fetchAll() }, [fetchAll])
 
-  // ─── Actions ───────────────────────────────────────────────
+  // ─── State ───────────────────────────────────────────────
   const [toggling, setToggling] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [showPaymentForm, setShowPaymentForm] = useState(false)
-  const [payForm, setPayForm] = useState({ amount: '', payment_method: 'cash', payment_reference: '', notes: '' })
+  const [payForm, setPayForm] = useState({ amount: '', payment_method: 'especes', reference_number: '', notes: '' })
   const [savingPay, setSavingPay] = useState(false)
+  const [showDiscountForm, setShowDiscountForm] = useState(false)
+  const [discountForm, setDiscountForm] = useState({ amount: '', reason: '' })
+  const [savingDiscount, setSavingDiscount] = useState(false)
   const [editingSchool, setEditingSchool] = useState(false)
   const [schoolForm, setSchoolForm] = useState({})
   const [editingFeatures, setEditingFeatures] = useState(false)
   const [featureForm, setFeatureForm] = useState([])
   const [savingFeatures, setSavingFeatures] = useState(false)
+  const [editingLicenseField, setEditingLicenseField] = useState(null)
+  const [licenseFieldValue, setLicenseFieldValue] = useState('')
   const [showRenewModal, setShowRenewModal] = useState(false)
   const [renewKey, setRenewKey] = useState(null)
 
+  // ─── Actions ───────────────────────────────────────────────
   async function toggleLicense() {
     if (!license) return
     setToggling(true)
@@ -96,18 +107,59 @@ export default function SchoolDetailPage() {
     e.preventDefault()
     setSavingPay(true)
     const supabase = getSupabase()
+    const amount = parseInt(payForm.amount)
     await supabase.from('license_payments').insert({
-      license_id: license.id, school_id: id, amount: parseFloat(payForm.amount),
-      payment_method: payForm.payment_method, payment_reference: payForm.payment_reference || null, notes: payForm.notes || null,
+      license_id: license.id, school_id: id, amount,
+      payment_method: payForm.payment_method, reference_number: payForm.reference_number || null, notes: payForm.notes || null,
       recorded_by: 'owner',
     })
+
+    const newPaidCount = Math.floor((license.amount_paid + amount) / license.rate_per_student)
+    await supabase.from('licenses').update({
+      amount_paid: license.amount_paid + amount,
+      paid_student_count: Math.min(newPaidCount, license.allowed_students),
+    }).eq('id', license.id)
+
     await supabase.from('cap_audit_logs').insert({
       actor: 'owner', action: 'PAYMENT_RECORDED', entity_type: 'school', entity_id: id,
-      new_values: { amount: payForm.amount, method: payForm.payment_method },
+      new_values: { amount, method: payForm.payment_method },
     })
     setSavingPay(false)
     setShowPaymentForm(false)
-    setPayForm({ amount: '', payment_method: 'cash', payment_reference: '', notes: '' })
+    setPayForm({ amount: '', payment_method: 'especes', reference_number: '', notes: '' })
+    fetchAll()
+  }
+
+  async function addDiscount(e) {
+    e.preventDefault()
+    setSavingDiscount(true)
+    const supabase = getSupabase()
+    await supabase.from('license_discounts').insert({
+      license_id: license.id, school_id: id,
+      amount: parseInt(discountForm.amount), reason: discountForm.reason.trim(),
+      granted_by: 'owner',
+    })
+    await supabase.from('cap_audit_logs').insert({
+      actor: 'owner', action: 'DISCOUNT_GRANTED', entity_type: 'school', entity_id: id,
+      new_values: { amount: discountForm.amount, reason: discountForm.reason },
+    })
+    setSavingDiscount(false)
+    setShowDiscountForm(false)
+    setDiscountForm({ amount: '', reason: '' })
+    fetchAll()
+  }
+
+  async function saveLicenseField(field) {
+    const supabase = getSupabase()
+    const value = parseInt(licenseFieldValue)
+    if (isNaN(value) || value < 0) { setEditingLicenseField(null); return }
+    const old = license[field]
+    await supabase.from('licenses').update({ [field]: value }).eq('id', license.id)
+    await supabase.from('cap_audit_logs').insert({
+      actor: 'owner', action: 'LICENSE_FIELD_UPDATED', entity_type: 'school', entity_id: id,
+      old_values: { [field]: old }, new_values: { [field]: value },
+    })
+    setEditingLicenseField(null)
     fetchAll()
   }
 
@@ -142,27 +194,26 @@ export default function SchoolDetailPage() {
 
   async function handleRenewal(renewForm) {
     const supabase = getSupabase()
-
-    // Revoke current license
     await supabase.from('licenses').update({ status: 'REVOKED', is_active: false }).eq('id', license.id)
 
-    // Generate new key
     const { data: keyData } = await supabase.rpc('generate_license_key')
     if (!keyData?.[0]) return
     const { plain_key, key_hash, key_preview } = keyData[0]
-
-    // Compute expiry
     const { data: expiryDate } = await supabase.rpc('compute_expiry_date')
 
-    // Create new license
     await supabase.from('licenses').insert({
       school_id: id,
       license_key_hash: key_hash,
       license_key_preview: key_preview,
       tier: renewForm.tier || license.tier,
-      size: renewForm.size || license.size,
+      rate_per_student: renewForm.rate_per_student || license.rate_per_student,
+      declared_student_count: renewForm.declared_student_count || license.declared_student_count,
+      paid_student_count: 0,
+      allowed_students: renewForm.declared_student_count || license.declared_student_count,
+      amount_paid: 0,
+      installation_fee: 0,
+      installation_fee_paid: true,
       semesters_active: renewForm.semesters_active || license.semesters_active,
-      total_fee_due: renewForm.total_fee_due || license.total_fee_due,
       features: renewForm.features || license.features,
       semester_1_deadline: license.semester_1_deadline,
       semester_2_deadline: license.semester_2_deadline,
@@ -172,34 +223,74 @@ export default function SchoolDetailPage() {
 
     await supabase.from('cap_audit_logs').insert({
       actor: 'owner', action: 'LICENSE_RENEWED', entity_type: 'school', entity_id: id,
-      old_values: { license_id: license.id }, new_values: { tier: renewForm.tier, size: renewForm.size },
+      old_values: { license_id: license.id }, new_values: { tier: renewForm.tier },
     })
 
     setRenewKey(plain_key)
     fetchAll()
   }
 
+  // ─── Render helpers ────────────────────────────────────────
+  function EditableField({ label, field, value, suffix }) {
+    const isEditing = editingLicenseField === field
+    return (
+      <div>
+        <p className="text-steel-400 text-xs">{label}</p>
+        {isEditing ? (
+          <div className="flex items-center gap-1 mt-0.5">
+            <input type="number" min="0" autoFocus value={licenseFieldValue}
+              onChange={e => setLicenseFieldValue(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') saveLicenseField(field); if (e.key === 'Escape') setEditingLicenseField(null) }}
+              className="w-24 px-2 py-1 border border-brand rounded text-sm focus:outline-none" />
+            <button onClick={() => saveLicenseField(field)} className="text-xs text-brand font-medium">OK</button>
+            <button onClick={() => setEditingLicenseField(null)} className="text-xs text-steel-400">×</button>
+          </div>
+        ) : (
+          <p className="text-steel-800 cursor-pointer hover:text-brand transition-colors"
+            onClick={() => { setEditingLicenseField(field); setLicenseFieldValue(String(value)) }}>
+            {suffix ? `${value} ${suffix}` : formatXOF(value)}
+            <span className="text-xs text-steel-300 ml-1">✎</span>
+          </p>
+        )}
+      </div>
+    )
+  }
+
   if (loading) return <PageShell><div className="flex justify-center py-20"><div className="w-8 h-8 border-2 border-brand border-t-transparent rounded-full animate-spin" /></div></PageShell>
   if (!school) return <PageShell><p className="text-steel-500 py-20 text-center">École introuvable</p></PageShell>
 
   const expiryDays = daysUntil(license?.expiry_date)
+  const actualCount = license?.student_count_sync || license?.declared_student_count || 0
+  const overCount = license && actualCount > license.allowed_students
 
   return (
     <PageShell>
       <div className="max-w-3xl space-y-6">
         {/* Header */}
-        <div className="flex items-start justify-between">
-          <div>
-            <h1 className="text-xl font-medium text-steel-900">{school.school_name}</h1>
-            <div className="flex items-center gap-3 mt-1">
-              <span className="text-sm font-mono text-steel-500">{school.school_code}</span>
-              {license && <StatusBadge status={license.status} />}
-            </div>
-            <p className="text-xs text-steel-400 mt-1">
-              {school.director_name} · {school.phone || '—'} · {school.city} · Client depuis {formatDate(school.created_at)}
-            </p>
+        <div>
+          <h1 className="text-xl font-medium text-steel-900">{school.school_name}</h1>
+          <div className="flex items-center gap-3 mt-1">
+            <span className="text-sm font-mono text-steel-500">{school.school_code}</span>
+            <span className="text-xs text-steel-400">Préfixe: {school.school_prefix}</span>
+            {license && <StatusBadge status={license.status} />}
           </div>
+          <p className="text-xs text-steel-400 mt-1">
+            {school.director_name} · {school.phone || '—'} · {school.city}, {school.country} · Client depuis {formatDate(school.created_at)}
+          </p>
         </div>
+
+        {/* Over-count alert */}
+        {overCount && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3">
+            <svg className="w-5 h-5 text-red-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <div>
+              <p className="text-sm font-medium text-red-700">Dépassement d'élèves</p>
+              <p className="text-xs text-red-600">{actualCount} élèves réels vs {license.allowed_students} autorisés. Ajustez le nombre autorisé ou facturez la différence.</p>
+            </div>
+          </div>
+        )}
 
         {/* School Info */}
         <section className="bg-white rounded-xl border border-steel-200 p-6">
@@ -239,74 +330,103 @@ export default function SchoolDetailPage() {
           )}
         </section>
 
-        {/* Current License */}
+        {/* Current License + Pricing */}
         {license && (
           <section className="bg-white rounded-xl border border-steel-200 p-6">
-            <h2 className="text-xs font-semibold text-steel-400 uppercase tracking-wide mb-4">Licence actuelle</h2>
-            <div className="grid grid-cols-3 gap-4 text-sm">
-              <div><p className="text-steel-400 text-xs">Clé (aperçu)</p><p className="text-steel-800 font-mono">{license.license_key_preview}</p></div>
+            <h2 className="text-xs font-semibold text-steel-400 uppercase tracking-wide mb-4">Licence et tarification</h2>
+
+            <div className="grid grid-cols-4 gap-4 text-sm">
+              <div><p className="text-steel-400 text-xs">Clé (aperçu)</p><p className="text-steel-800 font-mono text-xs">{license.license_key_preview}</p></div>
               <div><p className="text-steel-400 text-xs">Plan</p><p className="text-steel-800 font-medium">
-                <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium mr-1 ${license.tier === 'PRO' ? 'bg-brand-50 text-brand-600' : 'bg-steel-100 text-steel-600'}`}>{license.tier}</span>
-                {license.size}</p></div>
+                <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${license.tier === 'PRO' ? 'bg-brand-50 text-brand-600' : 'bg-steel-100 text-steel-600'}`}>{license.tier}</span>
+              </p></div>
               <div><p className="text-steel-400 text-xs">Trimestres</p><p className="text-steel-800">{license.semesters_active}/3</p></div>
               <div><p className="text-steel-400 text-xs">Expiration</p>
                 <p className={`font-medium ${expiryDays !== null && expiryDays < 30 ? 'text-red-500' : 'text-steel-800'}`}>
                   {formatDate(license.expiry_date)} {expiryDays !== null && <span className="text-xs text-steel-400 ml-1">({expiryDays > 0 ? `${expiryDays}j` : 'expiré'})</span>}
                 </p></div>
-              <div><p className="text-steel-400 text-xs">Activé le</p><p className="text-steel-800">{license.hardware_bound_at ? formatDateTime(license.hardware_bound_at) : 'Non activé'}</p></div>
-              <div><p className="text-steel-400 text-xs">Statut</p><p className={`font-medium ${license.is_active ? 'text-brand' : 'text-red-500'}`}>{license.is_active ? 'Active' : 'Suspendue'}</p></div>
+            </div>
 
-              {/* Semester Deadlines */}
-              {(license.semester_1_deadline || license.semester_2_deadline || license.semester_3_deadline) && (
-                <div className="col-span-3">
-                  <p className="text-steel-400 text-xs mb-1">Deadlines</p>
-                  <div className="flex gap-3">
-                    {[
-                      { label: 'T1', month: license.semester_1_deadline },
-                      { label: 'T2', month: license.semester_2_deadline },
-                      { label: 'T3', month: license.semester_3_deadline },
-                    ].filter(d => d.month).map(d => (
-                      <span key={d.label} className="px-2 py-0.5 bg-steel-50 border border-steel-200 rounded text-xs text-steel-600">
-                        {d.label}: {['Jan','Fév','Mar','Avr','Mai','Juin','Juil','Août','Sep','Oct','Nov','Déc'][d.month - 1]}
-                      </span>
-                    ))}
-                  </div>
+            {/* Per-student pricing details — editable */}
+            <div className="mt-4 pt-4 border-t border-steel-100">
+              <p className="text-xs font-semibold text-steel-400 uppercase tracking-wide mb-3">Tarification par élève</p>
+              <div className="grid grid-cols-4 gap-4 text-sm">
+                <EditableField label="Tarif / élève" field="rate_per_student" value={license.rate_per_student} />
+                <EditableField label="Élèves déclarés" field="declared_student_count" value={license.declared_student_count} suffix="élèves" />
+                <EditableField label="Élèves autorisés" field="allowed_students" value={license.allowed_students} suffix="élèves" />
+                <div>
+                  <p className="text-steel-400 text-xs">Élèves réels (sync)</p>
+                  <p className={`text-sm font-medium ${overCount ? 'text-red-500' : 'text-steel-800'}`}>
+                    {license.student_count_sync ?? '—'}
+                  </p>
                 </div>
-              )}
+              </div>
+            </div>
 
-              {/* Features with edit */}
-              {license.features?.length > 0 && (
-                <div className="col-span-3">
-                  <div className="flex items-center justify-between mb-1">
-                    <p className="text-steel-400 text-xs">Fonctionnalités</p>
-                    <button onClick={() => setEditingFeatures(!editingFeatures)}
-                      className="text-xs text-brand hover:text-brand-600 font-medium">
-                      {editingFeatures ? 'Annuler' : 'Modifier'}
+            {/* Installation fee */}
+            <div className="mt-4 pt-4 border-t border-steel-100">
+              <div className="grid grid-cols-4 gap-4 text-sm">
+                <div><p className="text-steel-400 text-xs">Frais installation</p><p className="text-steel-800">{formatXOF(license.installation_fee)}</p></div>
+                <div><p className="text-steel-400 text-xs">Installation payée</p>
+                  <p className={`font-medium ${license.installation_fee_paid ? 'text-brand' : 'text-yellow-600'}`}>
+                    {license.installation_fee_paid ? 'Oui' : 'Non'}
+                  </p>
+                </div>
+                <div><p className="text-steel-400 text-xs">Activé le</p><p className="text-steel-800">{license.hardware_bound_at ? formatDateTime(license.hardware_bound_at) : 'Non activé'}</p></div>
+                <div><p className="text-steel-400 text-xs">Ingénieur</p><p className="text-steel-800">{license.assigned_engineer || '—'}</p></div>
+              </div>
+            </div>
+
+            {/* Deadlines */}
+            {(license.semester_1_deadline || license.semester_2_deadline || license.semester_3_deadline) && (
+              <div className="mt-4 pt-4 border-t border-steel-100">
+                <p className="text-steel-400 text-xs mb-1">Deadlines</p>
+                <div className="flex gap-3">
+                  {[
+                    { label: 'T1', month: license.semester_1_deadline },
+                    { label: 'T2', month: license.semester_2_deadline },
+                    { label: 'T3', month: license.semester_3_deadline },
+                  ].filter(d => d.month).map(d => (
+                    <span key={d.label} className="px-2 py-0.5 bg-steel-50 border border-steel-200 rounded text-xs text-steel-600">
+                      {d.label}: {['Jan','Fév','Mar','Avr','Mai','Juin','Juil','Août','Sep','Oct','Nov','Déc'][d.month - 1]}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Features */}
+            {license.features?.length > 0 && (
+              <div className="mt-4 pt-4 border-t border-steel-100">
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-steel-400 text-xs">Fonctionnalités</p>
+                  <button onClick={() => setEditingFeatures(!editingFeatures)}
+                    className="text-xs text-brand hover:text-brand-600 font-medium">
+                    {editingFeatures ? 'Annuler' : 'Modifier'}
+                  </button>
+                </div>
+                {!editingFeatures ? (
+                  <div className="flex flex-wrap gap-1">{license.features.map(f => <span key={f} className="px-2 py-0.5 bg-steel-100 text-steel-600 rounded text-xs">{f}</span>)}</div>
+                ) : (
+                  <div>
+                    <div className="grid grid-cols-3 gap-1.5 mb-2">
+                      {ALL_FEATURES.map(f => (
+                        <label key={f} className="flex items-center gap-1.5 text-xs text-steel-600 cursor-pointer">
+                          <input type="checkbox" checked={featureForm.includes(f)} onChange={() => {
+                            setFeatureForm(prev => prev.includes(f) ? prev.filter(x => x !== f) : [...prev, f])
+                          }} className="rounded border-steel-300 text-brand focus:ring-brand" />
+                          {f}
+                        </label>
+                      ))}
+                    </div>
+                    <button onClick={saveFeatures} disabled={savingFeatures}
+                      className="px-3 py-1.5 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors">
+                      {savingFeatures ? 'Enregistrement...' : 'Enregistrer'}
                     </button>
                   </div>
-                  {!editingFeatures ? (
-                    <div className="flex flex-wrap gap-1">{license.features.map(f => <span key={f} className="px-2 py-0.5 bg-steel-100 text-steel-600 rounded text-xs">{f}</span>)}</div>
-                  ) : (
-                    <div>
-                      <div className="grid grid-cols-3 gap-1.5 mb-2">
-                        {ALL_FEATURES.map(f => (
-                          <label key={f} className="flex items-center gap-1.5 text-xs text-steel-600 cursor-pointer">
-                            <input type="checkbox" checked={featureForm.includes(f)} onChange={() => {
-                              setFeatureForm(prev => prev.includes(f) ? prev.filter(x => x !== f) : [...prev, f])
-                            }} className="rounded border-steel-300 text-brand focus:ring-brand" />
-                            {f}
-                          </label>
-                        ))}
-                      </div>
-                      <button onClick={saveFeatures} disabled={savingFeatures}
-                        className="px-3 py-1.5 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors">
-                        {savingFeatures ? 'Enregistrement...' : 'Enregistrer les fonctionnalités'}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
 
             {/* Hardware */}
             <div className="mt-4 pt-4 border-t border-steel-100">
@@ -320,7 +440,7 @@ export default function SchoolDetailPage() {
                 )}
               </div>
               {license.hardware_fingerprint ? (
-                <div className="text-sm">
+                <div>
                   <p className="font-mono text-xs text-steel-600 break-all">{license.hardware_fingerprint}</p>
                   <p className="text-xs text-steel-400 mt-1">Lié le {formatDateTime(license.hardware_bound_at)}</p>
                 </div>
@@ -345,42 +465,53 @@ export default function SchoolDetailPage() {
           </section>
         )}
 
-        {/* Payments */}
+        {/* Financial Summary + Payments */}
         <section className="bg-white rounded-xl border border-steel-200 p-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xs font-semibold text-steel-400 uppercase tracking-wide">Paiements (licence actuelle)</h2>
-            <button onClick={() => setShowPaymentForm(!showPaymentForm)}
-              className="text-xs text-brand hover:text-brand-600 font-medium">{showPaymentForm ? 'Annuler' : '+ Ajouter un paiement'}</button>
+            <h2 className="text-xs font-semibold text-steel-400 uppercase tracking-wide">Paiements</h2>
+            <div className="flex gap-2">
+              <button onClick={() => { setShowDiscountForm(!showDiscountForm); setShowPaymentForm(false) }}
+                className="text-xs text-yellow-600 hover:text-yellow-700 font-medium">{showDiscountForm ? 'Annuler' : '+ Remise'}</button>
+              <button onClick={() => { setShowPaymentForm(!showPaymentForm); setShowDiscountForm(false) }}
+                className="text-xs text-brand hover:text-brand-600 font-medium">{showPaymentForm ? 'Annuler' : '+ Paiement'}</button>
+            </div>
           </div>
 
+          {/* Summary cards */}
           {paymentSummary && (
-            <div className="grid grid-cols-4 gap-3 mb-4 text-sm">
-              <div><p className="text-steel-400 text-xs">Total dû</p><p className="text-steel-800 font-medium">{formatXOF(paymentSummary.total_fee_due)}</p></div>
+            <div className="grid grid-cols-5 gap-3 mb-4 text-sm">
+              <div><p className="text-steel-400 text-xs">Total dû</p><p className="text-steel-800 font-medium">{formatXOF(paymentSummary.total_due)}</p></div>
               <div><p className="text-steel-400 text-xs">Payé</p><p className="text-brand font-medium">{formatXOF(paymentSummary.total_paid)}</p></div>
-              <div><p className="text-steel-400 text-xs">Solde</p><p className={`font-medium ${paymentSummary.balance > 0 ? 'text-red-500' : 'text-brand'}`}>{formatXOF(paymentSummary.balance)}</p></div>
+              <div><p className="text-steel-400 text-xs">Remises</p><p className="text-yellow-600 font-medium">{formatXOF(paymentSummary.total_discount)}</p></div>
+              <div><p className="text-steel-400 text-xs">Solde restant</p>
+                <p className={`font-medium ${paymentSummary.remaining > 0 ? 'text-red-500' : 'text-brand'}`}>{formatXOF(paymentSummary.remaining)}</p></div>
               <div><p className="text-steel-400 text-xs">Statut</p><PaymentBadge status={paymentSummary.payment_status} /></div>
             </div>
           )}
 
+          {/* Payment form */}
           {showPaymentForm && (
             <form onSubmit={addPayment} className="bg-steel-50 rounded-lg p-4 mb-4 grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs text-steel-500 mb-1">Montant <span className="text-red-500">*</span></label>
-                <input type="number" required value={payForm.amount} onChange={e => setPayForm(p => ({ ...p, amount: e.target.value }))}
+                <input type="number" required min="1" value={payForm.amount} onChange={e => setPayForm(p => ({ ...p, amount: e.target.value }))}
                   className="w-full px-3 py-1.5 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
               </div>
               <div>
                 <label className="block text-xs text-steel-500 mb-1">Méthode <span className="text-red-500">*</span></label>
                 <select value={payForm.payment_method} onChange={e => setPayForm(p => ({ ...p, payment_method: e.target.value }))}
                   className="w-full px-3 py-1.5 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand bg-white">
-                  <option value="cash">Espèces</option><option value="mobile_money">Mobile Money</option>
-                  <option value="bank_transfer">Virement</option><option value="other">Autre</option>
+                  {Object.entries(PAYMENT_METHODS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                 </select>
               </div>
-              <div><input value={payForm.payment_reference} onChange={e => setPayForm(p => ({ ...p, payment_reference: e.target.value }))} placeholder="Référence"
-                className="w-full px-3 py-1.5 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" /></div>
-              <div><input value={payForm.notes} onChange={e => setPayForm(p => ({ ...p, notes: e.target.value }))} placeholder="Notes"
-                className="w-full px-3 py-1.5 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" /></div>
+              <div>
+                <input value={payForm.reference_number} onChange={e => setPayForm(p => ({ ...p, reference_number: e.target.value }))} placeholder="Référence"
+                  className="w-full px-3 py-1.5 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
+              </div>
+              <div>
+                <input value={payForm.notes} onChange={e => setPayForm(p => ({ ...p, notes: e.target.value }))} placeholder="Notes"
+                  className="w-full px-3 py-1.5 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
+              </div>
               <div className="col-span-2">
                 <button type="submit" disabled={savingPay || !payForm.amount}
                   className="px-4 py-2 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">
@@ -390,6 +521,30 @@ export default function SchoolDetailPage() {
             </form>
           )}
 
+          {/* Discount form */}
+          {showDiscountForm && (
+            <form onSubmit={addDiscount} className="bg-yellow-50 rounded-lg p-4 mb-4 grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-steel-500 mb-1">Montant <span className="text-red-500">*</span></label>
+                <input type="number" required min="1" value={discountForm.amount} onChange={e => setDiscountForm(p => ({ ...p, amount: e.target.value }))}
+                  className="w-full px-3 py-1.5 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
+              </div>
+              <div>
+                <label className="block text-xs text-steel-500 mb-1">Raison <span className="text-red-500">*</span></label>
+                <input type="text" required value={discountForm.reason} onChange={e => setDiscountForm(p => ({ ...p, reason: e.target.value }))}
+                  placeholder="Ex: école rurale, fidélité..."
+                  className="w-full px-3 py-1.5 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
+              </div>
+              <div className="col-span-2">
+                <button type="submit" disabled={savingDiscount || !discountForm.amount || !discountForm.reason.trim()}
+                  className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">
+                  {savingDiscount ? 'Enregistrement...' : 'Accorder la remise'}
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* Payment history */}
           {payments.length > 0 ? (
             <table className="w-full text-xs">
               <thead><tr className="border-b border-steel-200">
@@ -403,13 +558,34 @@ export default function SchoolDetailPage() {
                 <tr key={p.id} className="border-b border-steel-100">
                   <td className="py-2 text-steel-700">{formatDate(p.payment_date)}</td>
                   <td className="py-2 text-steel-800 text-right font-medium">{formatXOF(p.amount)}</td>
-                  <td className="py-2 text-steel-600">{p.payment_method}</td>
-                  <td className="py-2 text-steel-600">{p.payment_reference || '—'}</td>
+                  <td className="py-2 text-steel-600">{PAYMENT_METHODS[p.payment_method] || p.payment_method}</td>
+                  <td className="py-2 text-steel-600">{p.reference_number || '—'}</td>
                   <td className="py-2 text-steel-500">{p.notes || '—'}</td>
                 </tr>
               ))}</tbody>
             </table>
           ) : <p className="text-sm text-steel-400 text-center py-4">Aucun paiement enregistré</p>}
+
+          {/* Discount history */}
+          {discounts.length > 0 && (
+            <div className="mt-4 pt-4 border-t border-steel-100">
+              <p className="text-xs font-semibold text-steel-400 uppercase tracking-wide mb-2">Remises accordées</p>
+              <table className="w-full text-xs">
+                <thead><tr className="border-b border-steel-200">
+                  <th className="text-left py-2 text-steel-400 font-medium">Date</th>
+                  <th className="text-right py-2 text-steel-400 font-medium">Montant</th>
+                  <th className="text-left py-2 text-steel-400 font-medium">Raison</th>
+                </tr></thead>
+                <tbody>{discounts.map(d => (
+                  <tr key={d.id} className="border-b border-steel-100">
+                    <td className="py-2 text-steel-700">{formatDate(d.created_at)}</td>
+                    <td className="py-2 text-yellow-600 text-right font-medium">-{formatXOF(d.amount)}</td>
+                    <td className="py-2 text-steel-600">{d.reason}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
         </section>
 
         {/* License History */}
@@ -420,14 +596,16 @@ export default function SchoolDetailPage() {
               <thead><tr className="border-b border-steel-200">
                 <th className="text-left py-2 text-steel-400 font-medium">Période</th>
                 <th className="text-left py-2 text-steel-400 font-medium">Plan</th>
-                <th className="text-right py-2 text-steel-400 font-medium">Montant</th>
+                <th className="text-right py-2 text-steel-400 font-medium">Élèves</th>
+                <th className="text-right py-2 text-steel-400 font-medium">Tarif</th>
                 <th className="text-left py-2 text-steel-400 font-medium">Statut</th>
               </tr></thead>
               <tbody>{licenseHistory.map(l => (
                 <tr key={l.id} className="border-b border-steel-100">
                   <td className="py-2 text-steel-700">{formatDate(l.created_at)} → {formatDate(l.expiry_date)}</td>
-                  <td className="py-2 text-steel-600">{l.tier} {l.size}</td>
-                  <td className="py-2 text-steel-800 text-right">{formatXOF(l.total_fee_due)}</td>
+                  <td className="py-2 text-steel-600">{l.tier}</td>
+                  <td className="py-2 text-steel-800 text-right">{l.declared_student_count}</td>
+                  <td className="py-2 text-steel-800 text-right">{formatXOF(l.rate_per_student)}/élève</td>
                   <td className="py-2"><StatusBadge status={l.status} /></td>
                 </tr>
               ))}</tbody>
@@ -441,7 +619,7 @@ export default function SchoolDetailPage() {
           {license?.last_sync_at && (
             <div className="flex gap-6 mb-4 text-sm">
               <div><p className="text-steel-400 text-xs">Dernière sync</p><p className="text-steel-800">{formatDateTime(license.last_sync_at)}</p></div>
-              {license.student_count_sync && <div><p className="text-steel-400 text-xs">Élèves</p><p className="text-steel-800">{license.student_count_sync}</p></div>}
+              {license.student_count_sync != null && <div><p className="text-steel-400 text-xs">Élèves réels</p><p className="text-steel-800">{license.student_count_sync}</p></div>}
             </div>
           )}
           {syncHistory.length > 0 ? (
@@ -451,6 +629,7 @@ export default function SchoolDetailPage() {
                 <th className="text-left py-2 text-steel-400 font-medium">Type</th>
                 <th className="text-left py-2 text-steel-400 font-medium">Statut</th>
                 <th className="text-right py-2 text-steel-400 font-medium">Records</th>
+                <th className="text-right py-2 text-steel-400 font-medium">Élèves</th>
               </tr></thead>
               <tbody>{syncHistory.map(s => (
                 <tr key={s.id} className="border-b border-steel-100">
@@ -458,6 +637,7 @@ export default function SchoolDetailPage() {
                   <td className="py-2 text-steel-600">{s.sync_type}</td>
                   <td className="py-2"><span className={`px-1.5 py-0.5 rounded text-xs font-medium ${s.status === 'success' ? 'bg-brand-50 text-brand-600' : s.status === 'failed' ? 'bg-red-100 text-red-600' : 'bg-yellow-100 text-yellow-700'}`}>{s.status}</span></td>
                   <td className="py-2 text-steel-800 text-right">{s.records_sent}</td>
+                  <td className="py-2 text-steel-800 text-right">{s.actual_student_count ?? '—'}</td>
                 </tr>
               ))}</tbody>
             </table>
@@ -488,19 +668,10 @@ export default function SchoolDetailPage() {
 
       {/* Renewal Modal */}
       {showRenewModal && !renewKey && (
-        <RenewModal
-          currentLicense={license}
-          onClose={() => setShowRenewModal(false)}
-          onRenew={handleRenewal}
-        />
+        <RenewModal currentLicense={license} onClose={() => setShowRenewModal(false)} onRenew={handleRenewal} />
       )}
-
-      {/* Key Reveal Modal (after renewal) */}
       {renewKey && (
-        <KeyRevealModal
-          licenseKey={renewKey}
-          onConfirm={() => { setRenewKey(null); setShowRenewModal(false) }}
-        />
+        <KeyRevealModal licenseKey={renewKey} onConfirm={() => { setRenewKey(null); setShowRenewModal(false) }} />
       )}
     </PageShell>
   )
@@ -510,20 +681,19 @@ export default function SchoolDetailPage() {
 function RenewModal({ currentLicense, onClose, onRenew }) {
   const [form, setForm] = useState({
     tier: currentLicense?.tier || 'STANDARD',
-    size: currentLicense?.size || 'SMALL',
+    rate_per_student: currentLicense?.rate_per_student || 2000,
+    declared_student_count: currentLicense?.declared_student_count || 0,
     semesters_active: currentLicense?.semesters_active || 3,
-    total_fee_due: '',
     features: [...(currentLicense?.features || [])],
   })
   const [saving, setSaving] = useState(false)
 
+  const projected = (parseInt(form.declared_student_count) || 0) * (parseInt(form.rate_per_student) || 0)
+
   async function handleSubmit(e) {
     e.preventDefault()
     setSaving(true)
-    await onRenew({
-      ...form,
-      total_fee_due: form.total_fee_due ? parseInt(form.total_fee_due) : currentLicense?.total_fee_due || 0,
-    })
+    await onRenew(form)
     setSaving(false)
   }
 
@@ -531,8 +701,8 @@ function RenewModal({ currentLicense, onClose, onRenew }) {
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
         <div className="p-6 border-b border-steel-200">
-          <h2 className="text-lg font-medium text-steel-900">Générer un renouvellement</h2>
-          <p className="text-xs text-steel-500 mt-1">La licence actuelle sera révoquée et une nouvelle clé sera générée.</p>
+          <h2 className="text-lg font-medium text-steel-900">Renouvellement</h2>
+          <p className="text-xs text-steel-500 mt-1">La licence actuelle sera révoquée. Pas de frais d'installation.</p>
         </div>
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           <div className="grid grid-cols-2 gap-4">
@@ -548,23 +718,39 @@ function RenewModal({ currentLicense, onClose, onRenew }) {
               </div>
             </div>
             <div>
-              <label className="block text-xs text-steel-500 mb-1">Taille</label>
+              <label className="block text-xs text-steel-500 mb-1">Trimestres</label>
               <div className="flex gap-2">
-                {['SMALL', 'MEDIUM', 'LARGE'].map(s => (
-                  <button key={s} type="button" onClick={() => setForm(p => ({ ...p, size: s }))}
-                    className={`flex-1 py-2 rounded-lg border text-xs font-medium transition-colors ${form.size === s ? 'border-brand bg-brand-50 text-brand-600' : 'border-steel-200 text-steel-500'}`}>
-                    {s === 'SMALL' ? 'S' : s === 'MEDIUM' ? 'M' : 'L'}
+                {[1, 2, 3].map(n => (
+                  <button key={n} type="button" onClick={() => setForm(p => ({ ...p, semesters_active: n }))}
+                    className={`flex-1 py-2 rounded-lg border text-xs font-medium transition-colors ${form.semesters_active === n ? 'border-brand bg-brand-50 text-brand-600' : 'border-steel-200 text-steel-500'}`}>
+                    {n}
                   </button>
                 ))}
               </div>
             </div>
           </div>
-          <div>
-            <label className="block text-xs text-steel-500 mb-1">Montant à facturer</label>
-            <input type="number" value={form.total_fee_due} onChange={e => setForm(p => ({ ...p, total_fee_due: e.target.value }))}
-              placeholder={String(currentLicense?.total_fee_due || 0)}
-              className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand" />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs text-steel-500 mb-1">Élèves déclarés</label>
+              <input type="number" min="1" value={form.declared_student_count}
+                onChange={e => setForm(p => ({ ...p, declared_student_count: e.target.value }))}
+                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
+            </div>
+            <div>
+              <label className="block text-xs text-steel-500 mb-1">Tarif / élève</label>
+              <input type="number" min="0" step="500" value={form.rate_per_student}
+                onChange={e => setForm(p => ({ ...p, rate_per_student: e.target.value }))}
+                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
+            </div>
           </div>
+          {projected > 0 && (
+            <div className="bg-steel-50 rounded-lg p-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-steel-500">Coût annuel projeté</span>
+                <span className="text-steel-800 font-medium">{formatXOF(projected)}</span>
+              </div>
+            </div>
+          )}
           <div className="flex gap-3 pt-2">
             <button type="button" onClick={onClose} className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors">Annuler</button>
             <button type="submit" disabled={saving} className="flex-1 py-2.5 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">

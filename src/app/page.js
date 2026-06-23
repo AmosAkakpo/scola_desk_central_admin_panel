@@ -63,7 +63,6 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState('all')
   const [tierFilter, setTierFilter] = useState('all')
-  const [sizeFilter, setSizeFilter] = useState('all')
   const [paymentFilter, setPaymentFilter] = useState('all')
   const [search, setSearch] = useState('')
 
@@ -87,9 +86,10 @@ export default function DashboardPage() {
   const total = schools.length
   const active = schools.filter(s => s.status === 'ACTIVE').length
   const totalRevenue = schools.reduce((sum, s) => sum + (s.payment?.total_paid || 0), 0)
-  const totalUnpaid = schools.reduce((sum, s) => sum + Math.max(0, s.payment?.balance || 0), 0)
+  const totalRemaining = schools.reduce((sum, s) => sum + Math.max(0, s.payment?.remaining || 0), 0)
+  const totalStudents = schools.reduce((sum, s) => sum + (s.declared_student_count || 0), 0)
   const expiring = schools.filter(s => { const d = daysUntil(s.expiry_date); return d !== null && d <= 30 && d > 0 }).length
-  const partialPay = schools.filter(s => s.payment?.payment_status === 'partial').length
+  const overCount = schools.filter(s => s.student_count_sync && s.student_count_sync > s.allowed_students).length
   const suspended = schools.filter(s => s.status === 'SUSPENDED').length
   const pending = schools.filter(s => s.status === 'PENDING_ACTIVATION').length
 
@@ -101,10 +101,10 @@ export default function DashboardPage() {
     }
     if (statusFilter !== 'all') {
       if (statusFilter === 'expiring') { const d = daysUntil(s.expiry_date); if (d === null || d > 30 || d <= 0) return false }
+      else if (statusFilter === 'overcount') { if (!s.student_count_sync || s.student_count_sync <= s.allowed_students) return false }
       else if (s.status !== statusFilter) return false
     }
     if (tierFilter !== 'all' && s.tier !== tierFilter) return false
-    if (sizeFilter !== 'all' && s.size !== sizeFilter) return false
     if (paymentFilter !== 'all' && s.payment?.payment_status !== paymentFilter) return false
     return true
   })
@@ -117,20 +117,21 @@ export default function DashboardPage() {
   }
 
   function resetFilters() {
-    setStatusFilter('all'); setTierFilter('all'); setSizeFilter('all'); setPaymentFilter('all'); setSearch('')
+    setStatusFilter('all'); setTierFilter('all'); setPaymentFilter('all'); setSearch('')
   }
 
-  const hasFilters = statusFilter !== 'all' || tierFilter !== 'all' || sizeFilter !== 'all' || paymentFilter !== 'all' || search
+  const hasFilters = statusFilter !== 'all' || tierFilter !== 'all' || paymentFilter !== 'all' || search
 
   return (
     <PageShell>
       {/* Metric Cards */}
-      <div className="grid grid-cols-4 gap-4 mb-4">
+      <div className="grid grid-cols-5 gap-4 mb-4">
         {[
           { label: 'Total écoles', value: total, color: 'text-steel-900', filter: 'all' },
-          { label: 'Actives cette année', value: active, color: 'text-brand', filter: 'ACTIVE' },
-          { label: 'Revenue total', value: formatXOF(totalRevenue), color: 'text-brand', filter: null },
-          { label: 'Impayés totaux', value: formatXOF(totalUnpaid), color: totalUnpaid > 0 ? 'text-red-500' : 'text-brand', filter: null },
+          { label: 'Actives', value: active, color: 'text-brand', filter: 'ACTIVE' },
+          { label: 'Élèves déclarés', value: totalStudents.toLocaleString(), color: 'text-steel-800', filter: null },
+          { label: 'Revenue reçu', value: formatXOF(totalRevenue), color: 'text-brand', filter: null },
+          { label: 'Solde restant', value: formatXOF(totalRemaining), color: totalRemaining > 0 ? 'text-red-500' : 'text-brand', filter: null },
         ].map(c => (
           <button key={c.label} onClick={() => c.filter !== null && setStatusFilter(statusFilter === c.filter ? 'all' : c.filter)} disabled={c.filter === null}
             className={`bg-white rounded-xl border p-4 text-left transition-colors ${statusFilter === c.filter ? 'border-brand ring-1 ring-brand' : 'border-steel-200 hover:border-steel-300'} ${c.filter === null ? 'cursor-default' : ''}`}>
@@ -144,16 +145,16 @@ export default function DashboardPage() {
       <div className="grid grid-cols-4 gap-4 mb-6">
         {[
           { label: 'Expirent ≤30j', value: expiring, color: 'text-yellow-600', bg: 'bg-yellow-50 border-yellow-200', filter: 'expiring' },
-          { label: 'Paiement partiel', value: partialPay, color: 'text-yellow-600', bg: 'bg-yellow-50 border-yellow-200', pFilter: 'partial' },
+          { label: 'Dépassement élèves', value: overCount, color: 'text-red-600', bg: 'bg-red-50 border-red-200', filter: 'overcount' },
           { label: 'Suspendues', value: suspended, color: 'text-red-600', bg: 'bg-red-50 border-red-200', filter: 'SUSPENDED' },
           { label: 'En attente', value: pending, color: 'text-steel-600', bg: 'bg-steel-50 border-steel-200', filter: 'PENDING_ACTIVATION' },
         ].map(c => (
           <button key={c.label} onClick={() => {
-            if (c.pFilter) { setPaymentFilter(paymentFilter === c.pFilter ? 'all' : c.pFilter); setStatusFilter('all') }
-            else { setStatusFilter(statusFilter === c.filter ? 'all' : c.filter); setPaymentFilter('all') }
+            setStatusFilter(statusFilter === c.filter ? 'all' : c.filter)
+            setPaymentFilter('all')
           }}
             className={`rounded-xl border p-3 text-left transition-colors ${
-              (statusFilter === c.filter || paymentFilter === c.pFilter) ? 'ring-1 ring-brand border-brand' : c.bg
+              statusFilter === c.filter ? 'ring-1 ring-brand border-brand' : c.bg
             }`}>
             <p className="text-xs text-steel-500">{c.label}</p>
             <p className={`text-lg font-medium ${c.color}`}>{c.value}</p>
@@ -172,10 +173,6 @@ export default function DashboardPage() {
           className="px-3 py-2 border border-steel-200 rounded-lg text-sm bg-white focus:outline-none focus:border-brand">
           <option value="all">Tous les plans</option><option value="STANDARD">Standard</option><option value="PRO">Pro</option>
         </select>
-        <select value={sizeFilter} onChange={e => setSizeFilter(e.target.value)}
-          className="px-3 py-2 border border-steel-200 rounded-lg text-sm bg-white focus:outline-none focus:border-brand">
-          <option value="all">Toutes tailles</option><option value="SMALL">S</option><option value="MEDIUM">M</option><option value="LARGE">L</option>
-        </select>
         <select value={paymentFilter} onChange={e => setPaymentFilter(e.target.value)}
           className="px-3 py-2 border border-steel-200 rounded-lg text-sm bg-white focus:outline-none focus:border-brand">
           <option value="all">Tous paiements</option><option value="paid">Payé</option><option value="partial">Partiel</option><option value="pending">Impayé</option>
@@ -191,14 +188,14 @@ export default function DashboardPage() {
           <thead>
             <tr className="border-b border-steel-200 bg-steel-50">
               <th className="text-left px-4 py-3 text-steel-500 font-medium">École</th>
-              <th className="text-left px-4 py-3 text-steel-500 font-medium">ID</th>
+              <th className="text-left px-4 py-3 text-steel-500 font-medium">Code</th>
               <th className="text-left px-4 py-3 text-steel-500 font-medium">Plan</th>
-              <th className="text-right px-4 py-3 text-steel-500 font-medium">Dû</th>
+              <th className="text-right px-4 py-3 text-steel-500 font-medium">Élèves</th>
+              <th className="text-right px-4 py-3 text-steel-500 font-medium">Tarif</th>
               <th className="text-right px-4 py-3 text-steel-500 font-medium">Payé</th>
               <th className="text-left px-4 py-3 text-steel-500 font-medium">Paiement</th>
               <th className="text-left px-4 py-3 text-steel-500 font-medium">Expiration</th>
               <th className="text-left px-4 py-3 text-steel-500 font-medium">Statut</th>
-              <th className="text-left px-4 py-3 text-steel-500 font-medium">Dernière sync</th>
               <th className="text-left px-4 py-3 text-steel-500 font-medium">Actions</th>
             </tr>
           </thead>
@@ -212,18 +209,23 @@ export default function DashboardPage() {
             ) : filtered.map(s => {
               const ed = daysUntil(s.expiry_date)
               const showRenew = ed !== null && ed <= 30
+              const isOver = s.student_count_sync && s.student_count_sync > s.allowed_students
               return (
                 <tr key={s.id} className="border-b border-steel-100 hover:bg-steel-50 transition-colors">
                   <td className="px-4 py-3">
                     <p className="text-steel-800 font-medium">{s.school_name}</p>
-                    <p className="text-xs text-steel-400">{s.director_name}</p>
+                    <p className="text-xs text-steel-400">{s.director_name} · {s.city}</p>
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-brand-600">{s.school_code}</td>
                   <td className="px-4 py-3">
-                    <span className="text-steel-800">{s.tier}</span>
-                    <span className="text-steel-400 text-xs ml-1">{s.size}</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${s.tier === 'PRO' ? 'bg-brand-50 text-brand-600' : 'bg-steel-100 text-steel-600'}`}>{s.tier}</span>
                   </td>
-                  <td className="px-4 py-3 text-right text-steel-700">{formatXOF(s.total_fee_due)}</td>
+                  <td className="px-4 py-3 text-right">
+                    <span className={`text-xs ${isOver ? 'text-red-500 font-medium' : 'text-steel-700'}`}>
+                      {s.student_count_sync ?? s.declared_student_count}/{s.allowed_students}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right text-xs text-steel-600">{formatXOF(s.rate_per_student)}/él.</td>
                   <td className="px-4 py-3 text-right text-steel-700">{formatXOF(s.payment?.total_paid || 0)}</td>
                   <td className="px-4 py-3">{s.payment && <PaymentBadge status={s.payment.payment_status} />}</td>
                   <td className="px-4 py-3">
@@ -232,7 +234,6 @@ export default function DashboardPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3"><StatusBadge status={s.status} /></td>
-                  <td className="px-4 py-3 text-xs text-steel-500">{s.last_sync_at ? formatDateTime(s.last_sync_at) : '—'}</td>
                   <td className="px-4 py-3">
                     <div className="flex gap-2">
                       <a href={`/schools/${s.school_id}`} className="text-xs text-brand hover:text-brand-600 font-medium">Voir</a>
