@@ -12,3 +12,12 @@ export function getSupabase() {
   )
   return client
 }
+
+// Returns the logged-in user's email for audit log attribution.
+// Falls back to 'unknown' only if the session is somehow missing
+// (should not happen behind AuthGuard).
+export async function getCurrentActor() {
+  const supabase = getSupabase()
+  const { data: { user } } = await supabase.auth.getUser()
+  return user?.email || 'unknown'
+}

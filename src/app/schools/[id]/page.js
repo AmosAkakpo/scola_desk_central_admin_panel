@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useParams } from 'next/navigation'
-import { getSupabase } from '@/lib/supabase'
+import { getSupabase, getCurrentActor } from '@/lib/supabase'
 import { PageShell, StatusBadge, PaymentBadge, formatDate, formatDateTime, formatXOF, daysUntil } from '@/lib/ui'
 
 const ALL_FEATURES = ['students', 'grades', 'reports', 'promotion', 'finance', 'payments', 'salary', 'expenses', 'bi']
@@ -83,7 +83,7 @@ export default function SchoolDetailPage() {
     const newStatus = license.status === 'SUSPENDED' ? 'ACTIVE' : 'SUSPENDED'
     await supabase.from('licenses').update({ status: newStatus, is_active: newStatus === 'ACTIVE' }).eq('id', license.id)
     await supabase.from('cap_audit_logs').insert({
-      actor: 'owner', action: newStatus === 'SUSPENDED' ? 'LICENSE_SUSPENDED' : 'LICENSE_REACTIVATED',
+      actor: await getCurrentActor(), action: newStatus === 'SUSPENDED' ? 'LICENSE_SUSPENDED' : 'LICENSE_REACTIVATED',
       entity_type: 'school', entity_id: id, old_values: { status: license.status }, new_values: { status: newStatus },
     })
     setToggling(false)
@@ -96,7 +96,7 @@ export default function SchoolDetailPage() {
     const supabase = getSupabase()
     await supabase.from('licenses').update({ hardware_fingerprint: null, hardware_bound_at: null, status: 'PENDING_ACTIVATION' }).eq('id', license.id)
     await supabase.from('cap_audit_logs').insert({
-      actor: 'owner', action: 'HARDWARE_RESET', entity_type: 'school', entity_id: id,
+      actor: await getCurrentActor(), action: 'HARDWARE_RESET', entity_type: 'school', entity_id: id,
       old_values: { fingerprint: license.hardware_fingerprint },
     })
     setResetting(false)
@@ -108,20 +108,23 @@ export default function SchoolDetailPage() {
     setSavingPay(true)
     const supabase = getSupabase()
     const amount = parseInt(payForm.amount)
+    const actor = await getCurrentActor()
     await supabase.from('license_payments').insert({
       license_id: license.id, school_id: id, amount,
       payment_method: payForm.payment_method, reference_number: payForm.reference_number || null, notes: payForm.notes || null,
-      recorded_by: 'owner',
+      recorded_by: actor,
     })
 
-    const newPaidCount = Math.floor((license.amount_paid + amount) / license.rate_per_student)
+    const newPaidCount = license.rate_per_student > 0
+      ? Math.floor((license.amount_paid + amount) / license.rate_per_student)
+      : license.paid_student_count
     await supabase.from('licenses').update({
       amount_paid: license.amount_paid + amount,
       paid_student_count: Math.min(newPaidCount, license.allowed_students),
     }).eq('id', license.id)
 
     await supabase.from('cap_audit_logs').insert({
-      actor: 'owner', action: 'PAYMENT_RECORDED', entity_type: 'school', entity_id: id,
+      actor, action: 'PAYMENT_RECORDED', entity_type: 'school', entity_id: id,
       new_values: { amount, method: payForm.payment_method },
     })
     setSavingPay(false)
@@ -134,13 +137,14 @@ export default function SchoolDetailPage() {
     e.preventDefault()
     setSavingDiscount(true)
     const supabase = getSupabase()
+    const actor = await getCurrentActor()
     await supabase.from('license_discounts').insert({
       license_id: license.id, school_id: id,
       amount: parseInt(discountForm.amount), reason: discountForm.reason.trim(),
-      granted_by: 'owner',
+      granted_by: actor,
     })
     await supabase.from('cap_audit_logs').insert({
-      actor: 'owner', action: 'DISCOUNT_GRANTED', entity_type: 'school', entity_id: id,
+      actor, action: 'DISCOUNT_GRANTED', entity_type: 'school', entity_id: id,
       new_values: { amount: discountForm.amount, reason: discountForm.reason },
     })
     setSavingDiscount(false)
@@ -156,7 +160,7 @@ export default function SchoolDetailPage() {
     const old = license[field]
     await supabase.from('licenses').update({ [field]: value }).eq('id', license.id)
     await supabase.from('cap_audit_logs').insert({
-      actor: 'owner', action: 'LICENSE_FIELD_UPDATED', entity_type: 'school', entity_id: id,
+      actor: await getCurrentActor(), action: 'LICENSE_FIELD_UPDATED', entity_type: 'school', entity_id: id,
       old_values: { [field]: old }, new_values: { [field]: value },
     })
     setEditingLicenseField(null)
@@ -168,7 +172,7 @@ export default function SchoolDetailPage() {
     const supabase = getSupabase()
     await supabase.from('schools').update(schoolForm).eq('id', id)
     await supabase.from('cap_audit_logs').insert({
-      actor: 'owner', action: 'SCHOOL_UPDATED', entity_type: 'school', entity_id: id, new_values: schoolForm,
+      actor: await getCurrentActor(), action: 'SCHOOL_UPDATED', entity_type: 'school', entity_id: id, new_values: schoolForm,
     })
     setEditingSchool(false)
     fetchAll()
@@ -184,7 +188,7 @@ export default function SchoolDetailPage() {
     const supabase = getSupabase()
     await supabase.from('licenses').update({ features: featureForm }).eq('id', license.id)
     await supabase.from('cap_audit_logs').insert({
-      actor: 'owner', action: 'FEATURES_UPDATED', entity_type: 'school', entity_id: id,
+      actor: await getCurrentActor(), action: 'FEATURES_UPDATED', entity_type: 'school', entity_id: id,
       old_values: { features: license.features }, new_values: { features: featureForm },
     })
     setSavingFeatures(false)
@@ -222,7 +226,7 @@ export default function SchoolDetailPage() {
     })
 
     await supabase.from('cap_audit_logs').insert({
-      actor: 'owner', action: 'LICENSE_RENEWED', entity_type: 'school', entity_id: id,
+      actor: await getCurrentActor(), action: 'LICENSE_RENEWED', entity_type: 'school', entity_id: id,
       old_values: { license_id: license.id }, new_values: { tier: renewForm.tier },
     })
 

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { getSupabase } from '@/lib/supabase'
+import { getSupabase, getCurrentActor } from '@/lib/supabase'
 import { PageShell, formatXOF } from '@/lib/ui'
 
 const STANDARD_FEATURES = ['students', 'grades', 'reports', 'promotion']
@@ -207,7 +207,7 @@ export default function NewSchoolPage() {
     if (licErr) { setError('École créée mais erreur sur la licence: ' + licErr.message); setSaving(false); return }
 
     await supabase.from('cap_audit_logs').insert({
-      actor: 'owner',
+      actor: await getCurrentActor(),
       action: 'SCHOOL_CREATED',
       entity_type: 'school',
       entity_id: school.id,

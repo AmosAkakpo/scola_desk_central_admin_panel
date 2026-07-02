@@ -21,7 +21,7 @@ export async function POST(request) {
 
   try {
     const body = await request.json()
-    const { school_id, hardware_fingerprint, sync_type, chunk_number, total_chunks, student_count, payload } = body
+    const { school_id, hardware_fingerprint, sync_type, student_count, payload, error_message } = body
 
     if (!school_id || !hardware_fingerprint || !sync_type) {
       return NextResponse.json(
@@ -69,7 +69,8 @@ export async function POST(request) {
       sync_type,
       status: syncStatus,
       records_sent: payload ? Object.keys(payload).length : 0,
-      chunk_reached: chunk_number || null,
+      actual_student_count: student_count ?? null,
+      error_message: error_message || null,
     })
 
     // Update license telemetry
