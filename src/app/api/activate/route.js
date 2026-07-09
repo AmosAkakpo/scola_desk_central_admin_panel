@@ -139,6 +139,34 @@ export async function POST(request) {
 
     const fp = hardware_fingerprint.trim()
 
+    // 1 PC = 1 school: refuse to bind a machine already bound to another
+    // school's ACTIVE license. Same-school rebinds (reissued key after
+    // unbind) are unaffected — the old license is REVOKED/unbound by then.
+    if (license.status === 'PENDING_ACTIVATION') {
+      const { data: boundElsewhere } = await supabase
+        .from('licenses')
+        .select('id, school_id')
+        .eq('hardware_fingerprint', fp)
+        .eq('status', 'ACTIVE')
+        .neq('school_id', school.id)
+        .limit(1)
+        .maybeSingle()
+
+      if (boundElsewhere) {
+        await supabase.from('cap_audit_logs').insert({
+          actor: 'system',
+          action: 'ACTIVATION_BLOCKED_CROSS_SCHOOL',
+          entity_type: 'license',
+          entity_id: license.id,
+          new_values: { school_code: school.school_code, fingerprint: fp, bound_to_school_id: boundElsewhere.school_id },
+        })
+        return NextResponse.json(
+          { error: 'HARDWARE_ALREADY_BOUND', message: 'Ce matériel est déjà lié à un autre établissement. Contactez ScolaDesk.' },
+          { status: 403 }
+        )
+      }
+    }
+
     // PENDING_ACTIVATION → first activation, bind hardware
     if (license.status === 'PENDING_ACTIVATION') {
       await supabase.from('licenses').update({
