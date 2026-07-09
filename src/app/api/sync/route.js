@@ -117,6 +117,7 @@ export async function POST(request) {
 
       await supabase.from('sync_records').insert({
         school_id: school.id,
+        sync_uid,
         sync_type,
         status: 'success',
         records_sent: records_sent ?? 0,
