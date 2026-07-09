@@ -74,6 +74,8 @@ export default function SchoolDetailPage() {
   const [licenseFieldValue, setLicenseFieldValue] = useState('')
   const [showRenewModal, setShowRenewModal] = useState(false)
   const [renewKey, setRenewKey] = useState(null)
+  const [showReissueConfirm, setShowReissueConfirm] = useState(false)
+  const [reissuing, setReissuing] = useState(false)
 
   // ─── Actions ───────────────────────────────────────────────
   async function toggleLicense() {
@@ -230,6 +232,52 @@ export default function SchoolDetailPage() {
       old_values: { license_id: license.id }, new_values: { tier: renewForm.tier },
     })
 
+    setRenewKey(plain_key)
+    fetchAll()
+  }
+
+  // Lost-key / new-PC replacement: revoke the current key and issue a fresh
+  // one for the SAME license period. Unlike renewal, everything commercial
+  // (expiry, tier, rates, payments) carries forward unchanged.
+  async function handleReissue() {
+    if (!license) return
+    setReissuing(true)
+    const supabase = getSupabase()
+
+    await supabase.from('licenses').update({ status: 'REVOKED', is_active: false }).eq('id', license.id)
+
+    const { data: keyData } = await supabase.rpc('generate_license_key')
+    if (!keyData?.[0]) { setReissuing(false); return }
+    const { plain_key, key_hash, key_preview } = keyData[0]
+
+    await supabase.from('licenses').insert({
+      school_id: id,
+      license_key_hash: key_hash,
+      license_key_preview: key_preview,
+      tier: license.tier,
+      rate_per_student: license.rate_per_student,
+      declared_student_count: license.declared_student_count,
+      paid_student_count: license.paid_student_count,
+      allowed_students: license.allowed_students,
+      amount_paid: license.amount_paid,
+      installation_fee: license.installation_fee,
+      installation_fee_paid: license.installation_fee_paid,
+      semesters_active: license.semesters_active,
+      features: license.features,
+      semester_1_deadline: license.semester_1_deadline,
+      semester_2_deadline: license.semester_2_deadline,
+      semester_3_deadline: license.semester_3_deadline,
+      expiry_date: license.expiry_date,
+    })
+
+    await supabase.from('cap_audit_logs').insert({
+      actor: await getCurrentActor(), action: 'LICENSE_REISSUED', entity_type: 'school', entity_id: id,
+      old_values: { license_id: license.id, key_preview: license.license_key_preview },
+      new_values: { key_preview },
+    })
+
+    setReissuing(false)
+    setShowReissueConfirm(false)
     setRenewKey(plain_key)
     fetchAll()
   }
@@ -465,6 +513,10 @@ export default function SchoolDetailPage() {
                 className="px-4 py-2 rounded-lg text-sm font-medium bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200 transition-colors">
                 Générer un renouvellement
               </button>
+              <button onClick={() => setShowReissueConfirm(true)}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 transition-colors">
+                Nouvelle clé (même année)
+              </button>
             </div>
           </section>
         )}
@@ -669,6 +721,33 @@ export default function SchoolDetailPage() {
           ) : <p className="text-sm text-steel-400 text-center py-4">Aucune action enregistrée</p>}
         </section>
       </div>
+
+      {/* Reissue Confirm Modal */}
+      {showReissueConfirm && !renewKey && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-6">
+            <h2 className="text-base font-semibold text-steel-900 mb-1">Nouvelle clé (même année)</h2>
+            <p className="text-sm text-steel-500 mb-4">
+              La clé actuelle sera révoquée immédiatement et une nouvelle clé sera générée
+              pour la même période de licence. Expiration, tarifs et paiements sont conservés.
+            </p>
+            <div className="bg-steel-50 rounded-lg px-4 py-3 mb-5 text-sm space-y-1">
+              <p className="text-steel-700">Clé actuelle : <span className="font-mono text-xs">{license?.license_key_preview}</span></p>
+              <p className="text-steel-500 text-xs">Expiration conservée : {license?.expiry_date}</p>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => setShowReissueConfirm(false)} disabled={reissuing}
+                className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 disabled:opacity-50">
+                Annuler
+              </button>
+              <button onClick={handleReissue} disabled={reissuing}
+                className="flex-1 py-2.5 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium">
+                {reissuing ? 'Génération...' : 'Générer la clé'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Renewal Modal */}
       {showRenewModal && !renewKey && (
