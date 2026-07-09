@@ -76,6 +76,8 @@ export default function SchoolDetailPage() {
   const [renewKey, setRenewKey] = useState(null)
   const [showReissueConfirm, setShowReissueConfirm] = useState(false)
   const [reissuing, setReissuing] = useState(false)
+  const [resetCode, setResetCode] = useState(null)
+  const [fetchingResetCode, setFetchingResetCode] = useState(false)
 
   // ─── Actions ───────────────────────────────────────────────
   async function toggleLicense() {
@@ -280,6 +282,32 @@ export default function SchoolDetailPage() {
     setShowReissueConfirm(false)
     setRenewKey(plain_key)
     fetchAll()
+  }
+
+  // Day-code for the school's admin password reset — computed server-side
+  // (the HMAC secret never reaches the browser), read to the school by phone.
+  async function fetchResetCode() {
+    setFetchingResetCode(true)
+    const supabase = getSupabase()
+    const { data: { session } } = await supabase.auth.getSession()
+    try {
+      const res = await fetch('/api/reset-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({ school_code: school.school_code }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        setResetCode(data)
+        await supabase.from('cap_audit_logs').insert({
+          actor: await getCurrentActor(), action: 'RESET_CODE_ISSUED', entity_type: 'school', entity_id: id,
+          new_values: { valid_on: data.valid_on },
+        })
+      }
+    } catch (err) {
+      console.error('reset-code', err)
+    }
+    setFetchingResetCode(false)
   }
 
   // ─── Render helpers ────────────────────────────────────────
@@ -517,6 +545,10 @@ export default function SchoolDetailPage() {
                 className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 transition-colors">
                 Nouvelle clé (même année)
               </button>
+              <button onClick={fetchResetCode} disabled={fetchingResetCode}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-steel-50 text-steel-700 hover:bg-steel-100 border border-steel-200 transition-colors disabled:opacity-50">
+                {fetchingResetCode ? '...' : 'Code de réinitialisation'}
+              </button>
             </div>
           </section>
         )}
@@ -721,6 +753,25 @@ export default function SchoolDetailPage() {
           ) : <p className="text-sm text-steel-400 text-center py-4">Aucune action enregistrée</p>}
         </section>
       </div>
+
+      {/* Reset Code Modal */}
+      {resetCode && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-6 text-center">
+            <h2 className="text-base font-semibold text-steel-900 mb-1">Code de réinitialisation admin</h2>
+            <p className="text-sm text-steel-500 mb-4">
+              À communiquer à l'école par téléphone. Valable uniquement le {resetCode.valid_on}.
+            </p>
+            <p className="font-mono text-2xl font-bold text-steel-900 tracking-widest bg-steel-50 rounded-lg py-4 mb-5 select-all">
+              {resetCode.code}
+            </p>
+            <button onClick={() => setResetCode(null)}
+              className="w-full py-2.5 bg-brand hover:bg-brand-600 text-white rounded-lg text-sm font-medium">
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Reissue Confirm Modal */}
       {showReissueConfirm && !renewKey && (
