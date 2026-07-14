@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
-import { createHmac, createHash } from 'node:crypto'
+import { createHmac, createHash, randomBytes } from 'node:crypto'
 
 export const runtime = 'nodejs'
 
@@ -32,7 +32,26 @@ function signPayload(payload) {
 const STANDARD_FEATURES = ['students', 'grades', 'reports', 'promotion']
 const PRO_FEATURES = ['students', 'grades', 'reports', 'promotion', 'finance', 'payments', 'salary', 'expenses', 'bi']
 
-function buildLicensePayload(school, license) {
+// One SQLCipher key per school, generated lazily on first activation and
+// stable for the school's lifetime (renewals/reissues never change it).
+// Escrowed in the schools row so support can recover a school whose local
+// safeStorage copy is lost. Lazy-at-activation means schools created
+// before migration 012 need no manual backfill -- one code path for all.
+async function ensureDbEncryptionKey(supabase, school) {
+  if (school.db_encryption_key) return school.db_encryption_key
+  const key = randomBytes(32).toString('hex')
+  const { error } = await supabase
+    .from('schools')
+    .update({ db_encryption_key: key })
+    .eq('id', school.id)
+    .is('db_encryption_key', null) // never overwrite a concurrent write
+  if (error) throw error
+  // Re-read in case a concurrent activation won the race above.
+  const { data } = await supabase.from('schools').select('db_encryption_key').eq('id', school.id).single()
+  return data.db_encryption_key
+}
+
+function buildLicensePayload(school, license, dbEncryptionKey) {
   const payload = {
     school_id: school.school_code,
     school_name: school.school_name,
@@ -57,6 +76,7 @@ function buildLicensePayload(school, license) {
     amount_paid: license.amount_paid,
     installation_fee: license.installation_fee,
     installation_fee_paid: license.installation_fee_paid,
+    db_encryption_key: dbEncryptionKey,
     issued_at: new Date().toISOString(),
   }
   payload.signature = signPayload(payload)
@@ -185,7 +205,8 @@ export async function POST(request) {
         new_values: { school_code: school.school_code, fingerprint: fp },
       })
 
-      const payload = buildLicensePayload(school, license)
+      const dbKey = await ensureDbEncryptionKey(supabase, school)
+      const payload = buildLicensePayload(school, license, dbKey)
       return NextResponse.json({ payload })
     }
 
@@ -195,7 +216,8 @@ export async function POST(request) {
         // Same device — re-activation OK
         await supabase.from('licenses').update({ failed_attempts: 0 }).eq('id', license.id)
 
-        const payload = buildLicensePayload(school, license)
+        const dbKey = await ensureDbEncryptionKey(supabase, school)
+        const payload = buildLicensePayload(school, license, dbKey)
         return NextResponse.json({ payload })
       } else {
         // Different device — REJECT
