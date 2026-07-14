@@ -160,3 +160,16 @@ export function daysUntil(dateStr) {
   if (!dateStr) return null
   return Math.ceil((new Date(dateStr) - new Date()) / (1000 * 60 * 60 * 24))
 }
+
+// Default license period: Aug 1 -> Jul 31 (owner-set 2026-07-13), matching
+// the local app's school-year convention. Computed client-side (no RPC
+// round-trip) so the date fields can be pre-filled AND immediately
+// editable in the form -- staff override either date before submitting.
+export function defaultLicensePeriod() {
+  const now = new Date()
+  const year = now.getMonth() + 1 >= 8 ? now.getFullYear() : now.getFullYear() - 1
+  return {
+    period_start: `${year}-08-01`,
+    expiry_date: `${year + 1}-07-31`,
+  }
+}

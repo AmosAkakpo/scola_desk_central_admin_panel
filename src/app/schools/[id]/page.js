@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams } from 'next/navigation'
 import { getSupabase, getCurrentActor } from '@/lib/supabase'
-import { PageShell, StatusBadge, PaymentBadge, formatDate, formatDateTime, formatXOF, daysUntil } from '@/lib/ui'
+import { PageShell, StatusBadge, PaymentBadge, formatDate, formatDateTime, formatXOF, daysUntil, defaultLicensePeriod } from '@/lib/ui'
 
 const ALL_FEATURES = ['students', 'grades', 'reports', 'promotion', 'finance', 'payments', 'salary', 'expenses', 'bi']
 const PAYMENT_METHODS = { especes: 'Espèces', mobile_money: 'Mobile Money', virement: 'Virement', autre: 'Autre' }
@@ -207,7 +207,6 @@ export default function SchoolDetailPage() {
     const { data: keyData } = await supabase.rpc('generate_license_key')
     if (!keyData?.[0]) return
     const { plain_key, key_hash, key_preview } = keyData[0]
-    const { data: expiryDate } = await supabase.rpc('compute_expiry_date')
 
     await supabase.from('licenses').insert({
       school_id: id,
@@ -226,7 +225,8 @@ export default function SchoolDetailPage() {
       semester_1_deadline: license.semester_1_deadline,
       semester_2_deadline: license.semester_2_deadline,
       semester_3_deadline: license.semester_3_deadline,
-      expiry_date: expiryDate,
+      period_start: renewForm.period_start,
+      expiry_date: renewForm.expiry_date,
     })
 
     await supabase.from('cap_audit_logs').insert({
@@ -690,7 +690,7 @@ export default function SchoolDetailPage() {
               </tr></thead>
               <tbody>{licenseHistory.map(l => (
                 <tr key={l.id} className="border-b border-steel-100">
-                  <td className="py-2 text-steel-700">{formatDate(l.created_at)} → {formatDate(l.expiry_date)}</td>
+                  <td className="py-2 text-steel-700">{formatDate(l.period_start || l.created_at)} → {formatDate(l.expiry_date)}</td>
                   <td className="py-2 text-steel-600">{l.tier}</td>
                   <td className="py-2 text-steel-800 text-right">{l.declared_student_count}</td>
                   <td className="py-2 text-steel-800 text-right">{formatXOF(l.rate_per_student)}/élève</td>
@@ -820,8 +820,10 @@ function RenewModal({ currentLicense, onClose, onRenew }) {
     declared_student_count: currentLicense?.declared_student_count || 0,
     semesters_active: currentLicense?.semesters_active || 3,
     features: [...(currentLicense?.features || [])],
+    ...defaultLicensePeriod(),
   })
   const [saving, setSaving] = useState(false)
+  const datesInvalid = !form.period_start || !form.expiry_date || form.expiry_date <= form.period_start
 
   const projected = (parseInt(form.declared_student_count) || 0) * (parseInt(form.rate_per_student) || 0)
 
@@ -878,6 +880,20 @@ function RenewModal({ currentLicense, onClose, onRenew }) {
                 className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
             </div>
           </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs text-steel-500 mb-1">Début de période</label>
+              <input type="date" required value={form.period_start}
+                onChange={e => setForm(p => ({ ...p, period_start: e.target.value }))}
+                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
+            </div>
+            <div>
+              <label className="block text-xs text-steel-500 mb-1">Expiration</label>
+              <input type="date" required value={form.expiry_date}
+                onChange={e => setForm(p => ({ ...p, expiry_date: e.target.value }))}
+                className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand" />
+            </div>
+          </div>
           {projected > 0 && (
             <div className="bg-steel-50 rounded-lg p-3 text-sm">
               <div className="flex justify-between">
@@ -888,7 +904,7 @@ function RenewModal({ currentLicense, onClose, onRenew }) {
           )}
           <div className="flex gap-3 pt-2">
             <button type="button" onClick={onClose} className="flex-1 py-2.5 border border-steel-200 text-steel-600 rounded-lg text-sm font-medium hover:bg-steel-50 transition-colors">Annuler</button>
-            <button type="submit" disabled={saving} className="flex-1 py-2.5 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">
+            <button type="submit" disabled={saving || datesInvalid} className="flex-1 py-2.5 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">
               {saving ? 'Génération...' : 'Renouveler et générer la clé'}
             </button>
           </div>

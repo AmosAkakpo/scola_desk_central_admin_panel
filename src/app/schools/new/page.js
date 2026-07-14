@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { getSupabase, getCurrentActor } from '@/lib/supabase'
-import { PageShell, formatXOF } from '@/lib/ui'
+import { PageShell, formatXOF, defaultLicensePeriod } from '@/lib/ui'
 
 const STANDARD_FEATURES = ['students', 'grades', 'reports', 'promotion']
 const PRO_FEATURES = ['students', 'grades', 'reports', 'promotion', 'finance', 'payments', 'salary', 'expenses', 'bi']
@@ -77,6 +77,7 @@ export default function NewSchoolPage() {
     features: [...STANDARD_FEATURES],
     semester_1_deadline: 12, semester_2_deadline: 3, semester_3_deadline: 6,
     engineer: '',
+    ...defaultLicensePeriod(),
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -162,9 +163,6 @@ export default function NewSchoolPage() {
 
     const { plain_key, key_hash, key_preview } = keyData[0]
 
-    const { data: expiryData } = await supabase.rpc('compute_expiry_date')
-    const expiryDate = expiryData || new Date().getFullYear() + '-08-30'
-
     const { data: school, error: schoolErr } = await supabase
       .from('schools')
       .insert({
@@ -200,7 +198,8 @@ export default function NewSchoolPage() {
       semester_1_deadline: form.semester_1_deadline || null,
       semester_2_deadline: form.semester_2_deadline || null,
       semester_3_deadline: form.semester_3_deadline || null,
-      expiry_date: expiryDate,
+      period_start: form.period_start,
+      expiry_date: form.expiry_date,
       assigned_engineer: form.engineer.trim() || null,
     })
 
@@ -346,6 +345,21 @@ export default function NewSchoolPage() {
               </div>
             </div>
 
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-steel-600 mb-1">Début de période <span className="text-red-500">*</span></label>
+                <input type="date" required value={form.period_start} onChange={e => update('period_start', e.target.value)}
+                  className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand" />
+                <p className="text-xs text-steel-400 mt-0.5">Défaut : 1er août de l'année académique en cours</p>
+              </div>
+              <div>
+                <label className="block text-sm text-steel-600 mb-1">Expiration <span className="text-red-500">*</span></label>
+                <input type="date" required value={form.expiry_date} onChange={e => update('expiry_date', e.target.value)}
+                  className="w-full px-3 py-2 border border-steel-200 rounded-lg text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand" />
+                <p className="text-xs text-steel-400 mt-0.5">Défaut : 31 juillet de l'année suivante</p>
+              </div>
+            </div>
+
             {/* Pricing summary */}
             {declaredCount > 0 && (
               <div className="bg-steel-50 rounded-lg p-4 space-y-1.5 text-sm">
@@ -414,7 +428,7 @@ export default function NewSchoolPage() {
 
           {error && <p className="text-red-500 text-sm">{error}</p>}
 
-          <button type="submit" disabled={saving || !form.school_name || !form.director_name || !form.city || declaredCount < 1}
+          <button type="submit" disabled={saving || !form.school_name || !form.director_name || !form.city || declaredCount < 1 || !form.period_start || !form.expiry_date || form.expiry_date <= form.period_start}
             className="w-full py-3 bg-brand hover:bg-brand-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">
             {saving ? 'Création en cours...' : 'Créer l\'école et générer la clé'}
           </button>
